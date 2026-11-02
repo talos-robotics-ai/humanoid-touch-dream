@@ -25,6 +25,7 @@
     International Conference on Intelligent Robots and Systems (IROS) 2026<br />
     <a href="https://humanoid-touch-dream.github.io/">Website</a> |
     <a href="https://arxiv.org/pdf/2604.13015">Paper</a> |
+    <a href="https://huggingface.co/datasets/chrisyrniu/humanoid-touch-dream">Dataset</a> |
     <a href="https://humanoid-touch-dream.github.io/wbc_mujoco/dist/index.html">Interactive WBC Demo</a>
 </p>
 
@@ -55,6 +56,9 @@ controller. The modules below cover collection, training, and deployment.
 | [Policy rollout](policy_rollout/README.md) | Live HTD, MXT, and ACT (HIT) inference with camera and tactile feedback |
 
 ## Getting started
+
+Download the [HTD dataset on Hugging Face](https://huggingface.co/datasets/chrisyrniu/humanoid-touch-dream)
+for the repaired source recordings in HDF5 format and accompanying camera videos.
 
 Clone the repository:
 
