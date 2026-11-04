@@ -1,0 +1,13 @@
+{
+ "stand_encoding": "zero_phase",
+ "speed_sampling": "continuous+march",
+ "velocity_grid": [
+  -0.4,
+  -0.2,
+  0.0,
+  0.49,
+  0.64,
+  0.77
+ ],
+ "n_cycles": 6000
+}

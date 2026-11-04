@@ -18,11 +18,40 @@ from the hand type:
 
 Robot descriptions, meshes, and the `inspire_hand_dftp.yml` / `inspire_hand_f1.yml`
 retargeting profiles are included under `assets/`; keep their relative paths.
-The controller loads the bundled
-[student_policy_jit.pt](g1_wbc_policy/student_policy_jit.pt) with its matching
-[g1_student_htd.yaml](g1_wbc_policy/g1_student_htd.yaml), including its gains,
-command ranges, and waist limits. Downloading the WBC submodule is not required.
-This WBC checkpoint is separate from the manipulation policy trained in `htd_policy/`.
+
+## Lower-body controller
+
+The arms are always driven by IK. `--lower_body` selects the policy on the 12 leg
+and 3 waist joints. Both are bundled, and neither is the manipulation policy
+trained in `htd_policy/`.
+
+| `--lower_body` | Policy | Files |
+| --- | --- | --- |
+| `talos_walk` (default) | talos_walk walking policy: walks (vx −0.4…0.8 m/s, turn ±1.0 rad/s, no sideways), balances, and follows the torso height/RPY command | [talos_walk/](talos_walk/README.md), driven by [talos_walk_lower.py](talos_walk_lower.py) |
+| `htd` | The original HTD WBC | [student_policy_jit.pt](g1_wbc_policy/student_policy_jit.pt) with [g1_student_htd.yaml](g1_wbc_policy/g1_student_htd.yaml) (gains, command ranges, waist limits) |
+
+With `talos_walk`, the leg and waist gains and the standing pose come from the
+run itself. The arm gains and the arm default pose stay those of
+`g1_student_htd.yaml`. talos_walk options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--talos_walk_root` | `robot_control/talos_walk` | Workspace with the deploy class and the run |
+| `--talos_walk_run` | `g1/g1_teleop_anyadapter` | Run under `<root>/logs` |
+| `--talos_walk_checkpoint` | `9999` | Checkpoint iteration |
+| `--talos_walk_filter` | `0.3` | First-order filter on the leg/waist targets; `1` turns it off |
+
+**Height and torso commands.** The controller sends talos_walk the height offset
+`torso_height − 0.75` (trained range −0.12…+0.02 m while walking) and the torso
+RPY (roll ±0.3, pitch −0.3…0.6, yaw ±0.6 rad). Data recorded for a policy
+deployed on talos_walk must store that offset as `body_pose[2]`; see
+[talos_walk/README.md](talos_walk/README.md#height-convention-with-htd).
+
+Check the bundled run without a robot (any environment with torch, numpy and PyYAML):
+
+```bash
+python talos_walk_lower.py
+```
 
 ## Install from the repository root
 
@@ -88,7 +117,10 @@ python -c 'import numpy, pinocchio; from pinocchio import casadi; import dex_ret
 ## Hardware handoff and startup
 
 **Controller startup moves the robot toward its default pose before the `s`
-prompt.** Prepare the robot's support/stop procedure and release its built-in
+prompt.** With `talos_walk`, this is a 3 s glide to the policy's stance with the
+leg and waist gains ramping up over the first 2 s. The controller then checks
+that every leg and waist joint is within 0.15 rad of the stance. If not, it
+damps the robot and exits. Prepare the robot's support/stop procedure and release its built-in
 motion controller for low-level motor control before launch. See the
 `MotionSwitcherClient` handoff in [Unitree's G1 example](https://github.com/unitreerobotics/unitree_sdk2_python/blob/master/example/g1/low_level/g1_low_level_example.py);
 this controller does not switch the robot's mode itself.
@@ -129,6 +161,10 @@ In the second, start the controller. Choose `--g1_type` from the table above:
 python g1_inspire_wb_controller.py --g1_type 0 --hand_type dftp
 ```
 
+This runs talos_walk on the legs and waist. Add `--lower_body htd` for the
+original HTD WBC, for example when collecting with this repository's collector
+or deploying a model trained on data recorded under it.
+
 Enter `s` followed by Enter when prompted. Then start
 [data collection](../data_collect/README.md#dftp-with-head-and-wrist-cameras)
 or [policy rollout](../policy_rollout/README.md) in its own environment.
@@ -160,7 +196,7 @@ and use the F1 training configuration for F1 data.
 
 | Input | Behavior |
 | --- | --- |
-| `s` + Enter | Starts the main loop after initialization |
+| `s` + Enter | Starts the main loop after initialization. With `talos_walk`, the policy blends in over 5 s with walk commands held at zero, then logs that it is LIVE |
 | Remote button index `[2]`, collector reset gesture, or rollout reset key | Starts a three-second reset; opens the hands and returns to the default arm/torso targets |
 | Remote button index `[3]` or Ctrl+C | Exits the main loop and requests damping |
 
@@ -170,6 +206,10 @@ Wait for reset completion before recalibrating the collector or starting rollout
 Pausing or exiting collection/rollout leaves this controller running with the
 latest received targets. Command publishing can resume without a reset.
 
-The default control and feedback rates are 50 Hz, matching the supplied WBC
-configuration. See the [collection controls](../data_collect/README.md#calibration-episodes-and-shutdown)
+With `talos_walk`, a tilt above 57° or a non-finite policy output damps the
+robot and exits the controller.
+
+The default control and feedback rates are 50 Hz, matching both lower-body
+policies. talos_walk refuses any other `--control_freq`, because its gait clock
+counts ticks. See the [collection controls](../data_collect/README.md#calibration-episodes-and-shutdown)
 and [rollout controls](../policy_rollout/README.md#operate-rollout).

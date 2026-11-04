@@ -57,3 +57,7 @@ dream_touch_results/
 
 # Bundled WBC checkpoint
 !/robot_control/g1_wbc_policy/student_policy_jit.pt
+
+# Bundled talos_walk lower-body policy (run, reference data, checkpoints)
+!/robot_control/talos_walk/logs/
+!/robot_control/talos_walk/**/*.pt

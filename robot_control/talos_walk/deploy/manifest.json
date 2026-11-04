@@ -1,0 +1,441 @@
+{
+ "run": "g1/g1_teleop_anyadapter",
+ "checkpoint": 9999,
+ "source": "talos_walk branch fix_for_heading_and_arms (uncommitted); tracker g1_teleop_anytrack/model_29999 + adapter 10k",
+ "actor_torchscript": "deploy/g1_adapter_actor.pt",
+ "actor_inputs": {
+  "obs": 716,
+  "history": 5056,
+  "residual": 325
+ },
+ "actor_out": 29,
+ "torchscript_max_abs_diff": 0.0,
+ "recommended_world_model": false,
+ "residual_when_world_model_off": "zeros",
+ "dt": 0.02,
+ "frame": 179,
+ "frames_stacked": 4,
+ "frame_order": "newest first",
+ "frame_segments": [
+  {
+   "name": "ang_vel",
+   "start": 0,
+   "width": 3
+  },
+  {
+   "name": "gravity",
+   "start": 3,
+   "width": 3
+  },
+  {
+   "name": "commands",
+   "start": 6,
+   "width": 3
+  },
+  {
+   "name": "dof_pos",
+   "start": 9,
+   "width": 29
+  },
+  {
+   "name": "dof_vel",
+   "start": 38,
+   "width": 29
+  },
+  {
+   "name": "last_action",
+   "start": 67,
+   "width": 29
+  },
+  {
+   "name": "phase",
+   "start": 96,
+   "width": 2
+  },
+  {
+   "name": "amo_rpy_h",
+   "start": 98,
+   "width": 4
+  },
+  {
+   "name": "amo_arm",
+   "start": 102,
+   "width": 14
+  },
+  {
+   "name": "heading_err",
+   "start": 116,
+   "width": 1
+  },
+  {
+   "name": "height",
+   "start": 117,
+   "width": 1
+  },
+  {
+   "name": "dq",
+   "start": 118,
+   "width": 29
+  },
+  {
+   "name": "dv",
+   "start": 147,
+   "width": 29
+  },
+  {
+   "name": "base_height_cmd",
+   "start": 176,
+   "width": 1
+  },
+  {
+   "name": "ref_feet_h",
+   "start": 177,
+   "width": 2
+  }
+ ],
+ "history": {
+  "len": 79,
+  "feat": 64,
+  "order": "oldest first",
+  "frame": "[ang_vel*0.05 (3), gravity (3), (q - default)*1 (29), dq*0.05 (29)]"
+ },
+ "scales": {
+  "ang_vel": 1.0,
+  "dof_pos": 1.0,
+  "dof_vel": 0.05,
+  "commands": [
+   2.0,
+   2.0,
+   2.0
+  ],
+  "amo_cmd (roll,pitch,yaw,height)": [
+   1.0,
+   1.0,
+   1.0,
+   2.0
+  ],
+  "history_vel": 0.05
+ },
+ "joint_names": [
+  "left_hip_pitch_joint",
+  "left_hip_roll_joint",
+  "left_hip_yaw_joint",
+  "left_knee_joint",
+  "left_ankle_pitch_joint",
+  "left_ankle_roll_joint",
+  "right_hip_pitch_joint",
+  "right_hip_roll_joint",
+  "right_hip_yaw_joint",
+  "right_knee_joint",
+  "right_ankle_pitch_joint",
+  "right_ankle_roll_joint",
+  "waist_yaw_joint",
+  "waist_roll_joint",
+  "waist_pitch_joint",
+  "left_shoulder_pitch_joint",
+  "left_shoulder_roll_joint",
+  "left_shoulder_yaw_joint",
+  "left_elbow_joint",
+  "left_wrist_roll_joint",
+  "left_wrist_pitch_joint",
+  "left_wrist_yaw_joint",
+  "right_shoulder_pitch_joint",
+  "right_shoulder_roll_joint",
+  "right_shoulder_yaw_joint",
+  "right_elbow_joint",
+  "right_wrist_roll_joint",
+  "right_wrist_pitch_joint",
+  "right_wrist_yaw_joint"
+ ],
+ "default_joint_angles": [
+  -0.2,
+  0.0,
+  0.0,
+  0.45,
+  -0.25,
+  0.0,
+  -0.2,
+  0.0,
+  0.0,
+  0.45,
+  -0.25,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.35,
+  0.2,
+  0.0,
+  0.8,
+  0.0,
+  0.0,
+  0.0,
+  0.35,
+  -0.2,
+  0.0,
+  0.8,
+  0.0,
+  0.0,
+  0.0
+ ],
+ "kp": [
+  100.0,
+  100.0,
+  100.0,
+  150.0,
+  40.0,
+  40.0,
+  100.0,
+  100.0,
+  100.0,
+  150.0,
+  40.0,
+  40.0,
+  100.0,
+  100.0,
+  100.0,
+  80.0,
+  80.0,
+  60.0,
+  50.0,
+  20.0,
+  20.0,
+  20.0,
+  80.0,
+  80.0,
+  60.0,
+  50.0,
+  20.0,
+  20.0,
+  20.0
+ ],
+ "kd": [
+  2.0,
+  2.0,
+  2.0,
+  4.0,
+  2.0,
+  2.0,
+  2.0,
+  2.0,
+  2.0,
+  4.0,
+  2.0,
+  2.0,
+  2.0,
+  2.0,
+  2.0,
+  2.0,
+  2.0,
+  2.0,
+  2.0,
+  1.0,
+  1.0,
+  1.0,
+  2.0,
+  2.0,
+  2.0,
+  2.0,
+  1.0,
+  1.0,
+  1.0
+ ],
+ "torque_limits": [
+  88.0,
+  88.0,
+  88.0,
+  139.0,
+  50.0,
+  50.0,
+  88.0,
+  88.0,
+  88.0,
+  139.0,
+  50.0,
+  50.0,
+  88.0,
+  50.0,
+  50.0,
+  25.0,
+  25.0,
+  25.0,
+  25.0,
+  25.0,
+  5.0,
+  5.0,
+  25.0,
+  25.0,
+  25.0,
+  25.0,
+  25.0,
+  5.0,
+  5.0
+ ],
+ "joint_travel": {
+  "lo": [
+   -2.5307,
+   -0.5236,
+   -2.7576,
+   -0.087267,
+   -0.87267,
+   -0.2618,
+   -2.5307,
+   -2.9671,
+   -2.7576,
+   -0.087267,
+   -0.87267,
+   -0.2618,
+   -2.618,
+   -0.52,
+   -0.52,
+   -3.0892,
+   -1.5882,
+   -2.618,
+   -1.0472,
+   -1.97222,
+   -1.61443,
+   -1.61443,
+   -3.0892,
+   -2.2515,
+   -2.618,
+   -1.0472,
+   -1.97222,
+   -1.61443,
+   -1.61443
+  ],
+  "hi": [
+   2.8798,
+   2.9671,
+   2.7576,
+   2.8798,
+   0.5236,
+   0.2618,
+   2.8798,
+   0.5236,
+   2.7576,
+   2.8798,
+   0.5236,
+   0.2618,
+   2.618,
+   0.52,
+   0.52,
+   2.6704,
+   2.2515,
+   2.618,
+   2.0944,
+   1.97222,
+   1.61443,
+   1.61443,
+   2.6704,
+   1.5882,
+   2.618,
+   2.0944,
+   1.97222,
+   1.61443,
+   1.61443
+  ]
+ },
+ "policy_joints": "all 29",
+ "action_scale": 0.25,
+ "pd_target": "q_des + action_scale * action, clipped to joint travel",
+ "trained_action_latency_ticks": [
+  0,
+  2
+ ],
+ "trained_obs_delay_s": [
+  0,
+  0.03
+ ],
+ "commands": {
+  "lin_vel_x": [
+   -0.4,
+   0.8
+  ],
+  "lin_vel_y": [
+   0.0,
+   0.0
+  ],
+  "ang_vel_z": [
+   -1.0,
+   1.0
+  ],
+  "turn_in_place_wz": [
+   0.4,
+   1.2
+  ],
+  "stand_if": {
+   "abs_vx_below": 0.05,
+   "abs_wz_below": 0.1
+  }
+ },
+ "torso_command": {
+  "roll": [
+   -0.3,
+   0.3
+  ],
+  "pitch": [
+   -0.3,
+   0.6
+  ],
+  "yaw": [
+   -0.6,
+   0.6
+  ],
+  "height_walk": [
+   -0.12,
+   0.02
+  ],
+  "height_stand": [
+   -0.21500000000000002,
+   0.015
+  ]
+ },
+ "arm_command_box": {
+  "lo": [
+   -2.80122,
+   -0.077425,
+   -2.3562,
+   -0.8901199999999999,
+   -1.7749998485999998,
+   -1.4529866022000002,
+   -1.4529866022000002,
+   -2.80122,
+   -2.128925,
+   -2.3562,
+   -0.8901199999999999,
+   -1.7749998485999998,
+   -1.4529866022000002,
+   -1.4529866022000002
+  ],
+  "hi": [
+   2.3824199999999998,
+   2.128925,
+   2.3562,
+   1.9373199999999997,
+   1.7749998485999998,
+   1.4529866022000002,
+   1.4529866022000002,
+   2.3824199999999998,
+   0.077425,
+   2.3562,
+   1.9373199999999997,
+   1.7749998485999998,
+   1.4529866022000002,
+   1.4529866022000002
+  ],
+  "trained_rate_rad_s": [
+   0.2,
+   4.0
+  ]
+ },
+ "heading_hold": {
+  "obs": true,
+  "err_max": 0.5
+ },
+ "base_height_nominal": 0.771,
+ "sole_center_in_ankle_roll_link": [
+  0.035,
+  0.0,
+  -0.03
+ ]
+}

@@ -150,11 +150,27 @@ class G1InspireWBController:
         
         logger_mp.info(f"Using config: {config_path}")
         
+        lower_body = getattr(self.args, 'lower_body', 'htd')
+        talos_walk_kwargs = None
+        if lower_body == 'talos_walk':
+            talos_walk_kwargs = dict(
+                root=self.args.talos_walk_root,
+                run=self.args.talos_walk_run,
+                checkpoint=self.args.talos_walk_checkpoint,
+                filter_alpha=self.args.talos_walk_filter,
+            )
+        logger_mp.info(f"Lower body: {lower_body}")
         self.wb_ctrl = G1_29_WholeBodyController(
             config_path=config_path,
             urdf_path=self.g1_urdf_path,
-            urdf_dir=self.g1_urdf_dir
+            urdf_dir=self.g1_urdf_dir,
+            lower_body=lower_body,
+            talos_walk_kwargs=talos_walk_kwargs,
         )
+        if lower_body == 'talos_walk' and abs(1.0 / self.control_freq - self.wb_ctrl.talos.dt) > 1e-9:
+            raise ValueError(
+                f"--control_freq {self.control_freq} Hz differs from the {1.0 / self.wb_ctrl.talos.dt:.0f} Hz "
+                "talos_walk was trained at; its gait clock counts ticks")
         logger_mp.info("Whole body controller initialized successfully")
     
     def _init_hand_controller(self):
@@ -413,6 +429,9 @@ class G1InspireWBController:
 
                 if self.wb_ctrl.remote_controller.button[3] == 1:
                     break
+                if self.wb_ctrl.lower_body_fault is not None:
+                    logger_mp.error(f"Lower body fault: {self.wb_ctrl.lower_body_fault}; exiting")
+                    break
         except KeyboardInterrupt:
             logger_mp.info("Keyboard interrupt received, shutting down...")
         finally:
@@ -444,6 +463,20 @@ if __name__ == "__main__":
                        help='G1 URDF type: 0=g1_body29_hand14_wrist4010, 1=g1_body29_hand14_wrist5010 (default: 0)')
     parser.add_argument('--publish_freq', type=int, default=50,
                        help='Robot state publishing frequency in Hz (default: 50)')
+    from talos_walk_lower import (DEFAULT_TALOS_WALK_CHECKPOINT, DEFAULT_TALOS_WALK_ROOT,
+                                  DEFAULT_TALOS_WALK_RUN)
+    parser.add_argument('--lower_body', type=str, default='talos_walk',
+                       choices=['talos_walk', 'htd'],
+                       help='Leg and waist policy: talos_walk (default) or htd, the bundled HTD WBC')
+    parser.add_argument('--talos_walk_root', type=str, default=DEFAULT_TALOS_WALK_ROOT,
+                       help='talos_walk workspace (default: robot_control/talos_walk)')
+    parser.add_argument('--talos_walk_run', type=str, default=DEFAULT_TALOS_WALK_RUN,
+                       help=f'run under <root>/logs (default: {DEFAULT_TALOS_WALK_RUN})')
+    parser.add_argument('--talos_walk_checkpoint', type=int, default=DEFAULT_TALOS_WALK_CHECKPOINT,
+                       help=f'checkpoint iteration (default: {DEFAULT_TALOS_WALK_CHECKPOINT})')
+    parser.add_argument('--talos_walk_filter', type=float, default=0.3,
+                       help='first-order filter on the leg/waist targets, 0 < alpha <= 1; '
+                            '1 turns it off (default: 0.3)')
     parsed_args = parser.parse_args()
     
     # Create controller
@@ -454,6 +487,7 @@ if __name__ == "__main__":
         logger_mp.info("G1 Inspire WB Controller (DDS) is running...")
         logger_mp.info(f"Control Frequency: {parsed_args.control_freq} Hz")
         logger_mp.info(f"Hand Type: {parsed_args.hand_type}, G1 Type: {parsed_args.g1_type}")
+        logger_mp.info(f"Lower body: {parsed_args.lower_body}")
         logger_mp.info("Waiting for teleoperation data via DDS...")
         logger_mp.info("===========================================")
         

@@ -1,0 +1,152 @@
+{
+ "robot": "g1",
+ "walk": {
+  "0.60": {
+   "ok": true,
+   "attempts": [
+    {
+     "mode": "seed",
+     "seconds": 241.0,
+     "status": "converged",
+     "vx_commanded": 0.6,
+     "vx_realised": 0.6446165633427482,
+     "step_length": 0.48219400152648173,
+     "stance_z_range": [
+      -0.04704573986029176,
+      -5.034167527284694e-14
+     ],
+     "swing_apex": 0.08577582230302504,
+     "swing_end_z": 5.4643789493269423e-14,
+     "periodicity_mean": 0.0037870617270419214,
+     "periodicity_max": 0.012679853298102006,
+     "base_tilt_max": 0.1112762968071667,
+     "seed_deviation_mean": 0.054660276201163205,
+     "feasible": true,
+     "good_fraction": 1.0,
+     "max_torque_ratio": 50.26694044577196,
+     "feasibility_detail": {
+      "smooth_nodes": 36,
+      "good": 36,
+      "torque_fail": 0,
+      "friction_fail": 0,
+      "unilateral_fail": 0,
+      "torque_ratio_smooth_max": 0.3267492312359801,
+      "friction_ratio_smooth_max": 0.6592033954407882,
+      "zmp_ratio_smooth_max": 6.37390762397376
+     }
+    }
+   ]
+  },
+  "0.80": {
+   "ok": true,
+   "attempts": [
+    {
+     "mode": "seed",
+     "seconds": 161.7,
+     "status": "converged",
+     "vx_commanded": 0.8,
+     "vx_realised": 0.7667989126159347,
+     "step_length": 0.6299854940849735,
+     "stance_z_range": [
+      -0.0422793516487122,
+      0.0015410271553015081
+     ],
+     "swing_apex": 0.09851997105744768,
+     "swing_end_z": -2.2598589666245061e-13,
+     "periodicity_mean": 0.004376344603731348,
+     "periodicity_max": 0.012270129435590546,
+     "base_tilt_max": 0.07190605568359555,
+     "seed_deviation_mean": 0.0678125354553975,
+     "feasible": true,
+     "good_fraction": 1.0,
+     "max_torque_ratio": 64.57541730689546,
+     "feasibility_detail": {
+      "smooth_nodes": 36,
+      "good": 36,
+      "torque_fail": 0,
+      "friction_fail": 0,
+      "unilateral_fail": 0,
+      "torque_ratio_smooth_max": 0.41820793170573733,
+      "friction_ratio_smooth_max": 0.40735054630022066,
+      "zmp_ratio_smooth_max": 3.5752440747541594
+     }
+    }
+   ]
+  },
+  "-0.40": {
+   "ok": true,
+   "attempts": [
+    {
+     "mode": "legs",
+     "seconds": 73.1,
+     "status": "converged",
+     "vx_commanded": -0.4,
+     "vx_realised": -0.3999999999999998,
+     "step_length": -0.3192000000000794,
+     "stance_z_range": [
+      -0.004036482048565902,
+      5.76899639170847e-14
+     ],
+     "swing_apex": 0.06999999000082849,
+     "swing_end_z": 5.757894161462218e-14,
+     "periodicity_mean": 0.0006277247774411521,
+     "periodicity_max": 0.009126019894463044,
+     "base_tilt_max": 0.01609074602600508,
+     "seed_deviation_mean": 0.012580342919768544,
+     "feasible": true,
+     "good_fraction": 1.0,
+     "max_torque_ratio": 33.021598955383126,
+     "feasibility_detail": {
+      "smooth_nodes": 36,
+      "good": 36,
+      "torque_fail": 0,
+      "friction_fail": 0,
+      "unilateral_fail": 0,
+      "torque_ratio_smooth_max": 0.6665034768612579,
+      "friction_ratio_smooth_max": 0.3466159202690317,
+      "zmp_ratio_smooth_max": 3.521213109626892
+     }
+    }
+   ]
+  },
+  "-0.20": {
+   "ok": true,
+   "attempts": [
+    {
+     "mode": "legs",
+     "seconds": 101.3,
+     "status": "converged",
+     "vx_commanded": -0.2,
+     "vx_realised": -0.2,
+     "step_length": -0.1595999999998808,
+     "stance_z_range": [
+      -0.003613687853061126,
+      2.0992929616880929e-13
+     ],
+     "swing_apex": 0.06999999000132442,
+     "swing_end_z": 2.0992929616880929e-13,
+     "periodicity_mean": 0.0007074318759600258,
+     "periodicity_max": 0.010320211944736202,
+     "base_tilt_max": 0.015208446705132416,
+     "seed_deviation_mean": 0.011295470380576567,
+     "feasible": true,
+     "good_fraction": 1.0,
+     "max_torque_ratio": 16.77084846339055,
+     "feasibility_detail": {
+      "smooth_nodes": 36,
+      "good": 36,
+      "torque_fail": 0,
+      "friction_fail": 0,
+      "unilateral_fail": 0,
+      "torque_ratio_smooth_max": 0.6080538662814345,
+      "friction_ratio_smooth_max": 0.36427339071834897,
+      "zmp_ratio_smooth_max": 4.016042101428049
+     }
+    }
+   ]
+  }
+ },
+ "march": {
+  "ok": true
+ }
+}

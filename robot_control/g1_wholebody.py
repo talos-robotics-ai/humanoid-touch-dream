@@ -164,22 +164,35 @@ class Config:
             self.command_range = config["command_range"]
 
 
+LOWER_BODY_CHOICES = ("talos_walk", "htd")
+
+
 class G1_29_WholeBodyController:
-    """Controller for G1 whole body - arms (IK) + lower body (policy)"""
-    
-    def __init__(self, config_path=None, urdf_path=None, urdf_dir=None):
+    """Controller for G1 whole body - arms (IK) + lower body (policy)
+
+    ``lower_body`` selects the policy on the 12 leg and 3 waist joints:
+    ``"talos_walk"`` (``talos_walk_lower.TalosWalkLowerBody``) or ``"htd"``
+    (the bundled HTD WBC checkpoint in ``g1_wbc_policy/``). The arms are on IK
+    either way. ``talos_walk_kwargs`` go to ``TalosWalkLowerBody``.
+    """
+
+    def __init__(self, config_path=None, urdf_path=None, urdf_dir=None,
+                 lower_body="htd", talos_walk_kwargs=None):
         logger_mp.info("Initialize G1_29_WholeBodyController...")
+        if lower_body not in LOWER_BODY_CHOICES:
+            raise ValueError(f"lower_body must be one of {LOWER_BODY_CHOICES}, got {lower_body!r}")
+        self.lower_body = lower_body
         self.arm_ik = G1_29_ArmIK(urdf_path=urdf_path, urdf_dir=urdf_dir)
         self.state_estimator = G1_29_KinematicStateEstimator(urdf_path=urdf_path, urdf_dir=urdf_dir)
         if config_path is None:
             config_path = DEFAULT_WBC_CONFIG_PATH
-        
+
         # Verify config file exists
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Config file not found: {config_path}")
-        
+
         logger_mp.info(f"Loading config from: {config_path}")
-        
+
         # load config
         self.config = Config(config_path)
         # initialize targets
@@ -188,16 +201,25 @@ class G1_29_WholeBodyController:
         self.q_lower_target = np.zeros(15)
         # load lower body control policy
         self.device = torch.device('cpu')
-        policy_full_path = os.path.abspath(os.path.join(self.config.policy_base_dir, self.config.policy_path))
-        if not os.path.exists(policy_full_path):
-            raise FileNotFoundError(
-                f"WBC checkpoint not found: {policy_full_path}. "
-                "Check policy_path in the controller YAML."
-            )
-        logger_mp.info(f"Loading policy from: {policy_full_path}")
-        self.policy = torch.jit.load(policy_full_path, map_location=self.device).eval()
-        logger_mp.info("Policy loaded successfully")
-        
+        self.policy = None
+        self.talos = None
+        self.lower_body_fault = None
+        self._talos_live = False
+        self._warned_vy = False
+        self.waist_velocity = None
+        if self.lower_body == "talos_walk":
+            self._init_talos_walk(talos_walk_kwargs or {})
+        else:
+            policy_full_path = os.path.abspath(os.path.join(self.config.policy_base_dir, self.config.policy_path))
+            if not os.path.exists(policy_full_path):
+                raise FileNotFoundError(
+                    f"WBC checkpoint not found: {policy_full_path}. "
+                    "Check policy_path in the controller YAML."
+                )
+            logger_mp.info(f"Loading policy from: {policy_full_path}")
+            self.policy = torch.jit.load(policy_full_path, map_location=self.device).eval()
+            logger_mp.info("Policy loaded successfully")
+
         self.lower_joint_pos = np.zeros(self.config.num_actions, dtype=np.float32)
         self.lower_joint_vel = np.zeros(self.config.num_actions, dtype=np.float32)
         self.action = np.zeros(self.config.num_actions, dtype=np.float32)
@@ -256,16 +278,50 @@ class G1_29_WholeBodyController:
         self.lin_vel_x_cmd = 0.0
         self.lin_vel_y_cmd = 0.0
         self.ang_vel_z_cmd = 0.0
-        
+
         # Warm up policy
         logger_mp.info("Warming up policy...")
-        for _ in range(50):
-            with torch.inference_mode():
-                obs = self.current_obs_history.reshape(1, -1).astype(np.float32)
-                self.policy(torch.from_numpy(obs).to(self.device))
+        if self.lower_body == "talos_walk":
+            state = self.lowstate_buffer.GetData()
+            q, dq = self._talos_joint_state(state)
+            self.talos.warm_up(q, dq, state.imu_state.quaternion, state.imu_state.gyroscope)
+        else:
+            for _ in range(50):
+                with torch.inference_mode():
+                    obs = self.current_obs_history.reshape(1, -1).astype(np.float32)
+                    self.policy(torch.from_numpy(obs).to(self.device))
         logger_mp.info("Policy warmed up!\n")
         logger_mp.info("Initialize G1_29_WholeBodyController OK!\n")
-    
+
+    def _init_talos_walk(self, talos_walk_kwargs):
+        """Load talos_walk and let it set the lower-body table: its trained
+        gains and its standing pose replace the HTD WBC's. The arm table
+        (gains, default pose) stays the YAML's."""
+        from talos_walk_lower import (TalosWalkLowerBody, VelocityFromPosition,
+                                      WAIST_ROLL_PITCH_MOTORS)
+        self.talos = TalosWalkLowerBody(logger=logger_mp, **talos_walk_kwargs)
+        logger_mp.info(f"Lower body: {self.talos.describe()}")
+        if list(self.config.lower_joint2motor_idx) != list(range(15)):
+            raise ValueError("talos_walk drives motor slots 0..14; the YAML's joint2motor_idx differs")
+        self.config.lower_kps = [float(v) for v in self.talos.kp]
+        self.config.lower_kds = [float(v) for v in self.talos.kd]
+        self.config.default_lower_joint_pos = self.talos.stance().astype(np.float32)
+        # The joystick maps to talos_walk's own command box (it never walks sideways).
+        self.config.command_range = dict(self.config.command_range)
+        self.config.command_range["lin_vel_x"] = list(self.talos.vx_range)
+        self.config.command_range["lin_vel_y"] = [0.0, 0.0]
+        self.config.command_range["ang_vel_z"] = list(self.talos.wz_range)
+        self.waist_velocity_motors = list(WAIST_ROLL_PITCH_MOTORS)
+        self.waist_velocity = VelocityFromPosition(len(self.waist_velocity_motors))
+
+    def _talos_joint_state(self, lowstate):
+        """All 29 joint positions and velocities in motor order, with waist
+        roll and pitch velocity taken from position."""
+        q = np.array([lowstate.motor_state[i].q for i in range(G1_29_Num_Motors)], dtype=np.float64)
+        dq = np.array([lowstate.motor_state[i].dq for i in range(G1_29_Num_Motors)], dtype=np.float64)
+        dq[self.waist_velocity_motors] = self.waist_velocity.value
+        return q, dq
+
     def _subscribe_motor_state(self):
         while True:
             lowstate_msg = self.lowstate_subscriber.Read()
@@ -278,6 +334,9 @@ class G1_29_WholeBodyController:
                 lowstate.imu_state.gyroscope = lowstate_msg.imu_state.gyroscope
                 lowstate.imu_state.accelerometer = lowstate_msg.imu_state.accelerometer
                 lowstate.imu_state.rpy = lowstate_msg.imu_state.rpy
+                if self.waist_velocity is not None:
+                    self.waist_velocity.update(
+                        [lowstate_msg.motor_state[m].q for m in self.waist_velocity_motors])
                 self.lowstate_buffer.SetData(lowstate)
                 self.remote_controller.set(lowstate_msg.wireless_remote)
             
@@ -361,6 +420,9 @@ class G1_29_WholeBodyController:
                 Joystick always takes priority when operator gives non-zero input.
                 When None, falls back to joystick (remote_controller).
         """
+        if self.lower_body == "talos_walk":
+            self._update_lower_body_talos(torso_height_cmd, torso_rpy_cmd, velocity_commands)
+            return
         lowstate = self.lowstate_buffer.GetData()
         # Extract current joint positions and velocities
         for i in range(len(self.config.lower_joint2motor_idx)):
@@ -449,7 +511,61 @@ class G1_29_WholeBodyController:
         )
         # Update lower body target
         self.q_lower_target = target_dof_pos
-    
+
+    def _select_velocity_command(self, velocity_commands):
+        """Joystick when the operator deflects it or no command is given,
+        otherwise ``velocity_commands`` ([vx, vy, wz])."""
+        joy_active = (self.remote_controller.lin_vel_x != 0 or
+                      self.remote_controller.lin_vel_y != 0 or
+                      self.remote_controller.ang_vel_z != 0)
+        if joy_active or velocity_commands is None:
+            self.lin_vel_x_cmd = self.remote_controller.lin_vel_x
+            self.lin_vel_y_cmd = self.remote_controller.lin_vel_y
+            self.ang_vel_z_cmd = self.remote_controller.ang_vel_z
+        else:
+            self.lin_vel_x_cmd = float(velocity_commands[0])
+            self.lin_vel_y_cmd = float(velocity_commands[1])
+            self.ang_vel_z_cmd = float(velocity_commands[2])
+
+    def _update_lower_body_talos(self, torso_height_cmd, torso_rpy_cmd, velocity_commands=None):
+        """One talos_walk tick. The arm command the policy observes is the IK
+        arm target on the wire. A fault damps the whole robot and stops the
+        lower body for good; the caller sees ``lower_body_fault``."""
+        from talos_walk_lower import NOMINAL_TORSO_HEIGHT, TalosWalkFault
+        if self.lower_body_fault is not None:
+            return
+        if not self._talos_live:
+            # Handover: blend from the stance targets on the wire.
+            self.talos.begin_blend(np.array(self.q_lower_target, dtype=np.float64))
+            self._talos_live = True
+            logger_mp.warning("[talos_walk] blending in over "
+                              f"{self.talos.blend_ticks * self.talos.dt:.1f} s; "
+                              "walk commands are held at zero until it is done")
+        self._select_velocity_command(velocity_commands)
+        if self.lin_vel_y_cmd != 0.0 and not self._warned_vy:
+            logger_mp.warning("[talos_walk] lateral velocity is not supported; vy is ignored")
+            self._warned_vy = True
+        lowstate = self.lowstate_buffer.GetData()
+        q, dq = self._talos_joint_state(lowstate)
+        with self.ctrl_lock:
+            arm_q = np.array(self.q_arm_target, dtype=np.float64)
+        was_blending = self.talos.blending
+        try:
+            target = self.talos.step(
+                q, dq, lowstate.imu_state.quaternion, lowstate.imu_state.gyroscope,
+                arm_q, torso_rpy_cmd, float(torso_height_cmd) - NOMINAL_TORSO_HEIGHT,
+                self.lin_vel_x_cmd, self.ang_vel_z_cmd)
+        except TalosWalkFault as e:
+            self.lower_body_fault = str(e)
+            logger_mp.error(f"[talos_walk] {e}: damping the robot")
+            self.setup_damping()
+            return
+        if was_blending and not self.talos.blending:
+            logger_mp.warning("[talos_walk] the walking policy is LIVE: "
+                              "a non-zero walk command moves the robot now")
+        with self.ctrl_lock:
+            self.q_lower_target = target.astype(np.float64)
+
     def get_mode_machine(self):
         return self.lowstate_subscriber.Read().mode_machine
     
@@ -572,9 +688,16 @@ class G1_29_WholeBodyController:
         for i in range(arm_dof_size):
             arm_init_dof_pos[i] = current_state.motor_state[arm_dof_idx[i]].q
         
+        # talos_walk: the leg/waist gains ramp up from a fraction over the first
+        # 2 s of the glide instead of starting at full stiffness.
+        talos = self.lower_body == "talos_walk"
+        gain_ramp_s, gain_floor = (2.0, 0.2) if talos else (0.0, 1.0)
+
         # Gradually move to default positions
         for i in range(num_step):
             alpha = i / num_step
+            t = i * self.config.policy_control_dt
+            gain = 1.0 if gain_ramp_s <= 0.0 else gain_floor + (1.0 - gain_floor) * min(1.0, t / gain_ramp_s)
             # Update lower body targets
             for j in range(lower_dof_size):
                 motor_idx = lower_dof_idx[j]
@@ -582,7 +705,7 @@ class G1_29_WholeBodyController:
                 interpolated_pos = lower_init_dof_pos[j] * (1 - alpha) + target_pos * alpha
                 with self.ctrl_lock:
                     self.q_lower_target[j] = interpolated_pos
-                    self.msg.motor_cmd[motor_idx].kp = self.config.lower_kps[j]
+                    self.msg.motor_cmd[motor_idx].kp = self.config.lower_kps[j] * gain
                     self.msg.motor_cmd[motor_idx].kd = self.config.lower_kds[j]
             # Update arm targets
             for k in range(arm_dof_size):
@@ -594,7 +717,24 @@ class G1_29_WholeBodyController:
                     self.msg.motor_cmd[motor_idx].kp = self.config.arm_kps[k]
                     self.msg.motor_cmd[motor_idx].kd = self.config.arm_kds[k]
             time.sleep(self.config.policy_control_dt)
-        
+
+        if talos:
+            with self.ctrl_lock:
+                # The last interpolation step stops one step short of the stance.
+                self.q_lower_target[:] = self.config.default_lower_joint_pos
+            # Pose parity before the policy may take over: a leg or waist joint
+            # far from the stance would hand the network a state it never saw.
+            time.sleep(0.5)
+            measured = self.get_current_lower_body_q()
+            worst = np.abs(measured - self.config.default_lower_joint_pos)
+            if np.max(worst) > 0.15:
+                self.setup_damping()
+                time.sleep(0.3)
+                raise RuntimeError(
+                    "talos_walk handover refused: joint slot "
+                    f"{int(np.argmax(worst))} is {np.max(worst):.3f} rad from the stance "
+                    "(limit 0.15). The robot was damped.")
+
         logger_mp.info("Reached default position")
     
     def setup_damping(self):

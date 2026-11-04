@@ -48,6 +48,13 @@ Match the cameras and hand type to training:
   remaining side. Each wrist image is 640×480 at `480p`.
 - Match the hand driver, controller's `--hand_type`, and rollout's
   `--inspire_hand_type` (`dftp` or `f1`) to the installed hands and trained model.
+- Match the controller's `--lower_body` to the lower body the training data was
+  recorded under. The default is `talos_walk`; see the
+  [lower-body controller](../robot_control/README.md#lower-body-controller)
+  section. Under talos_walk, the torso height the model predicts is the walker's
+  height offset (−0.12…+0.02 m). With `--send_velocity_commands True`, the
+  predicted `vx` and `wz` are clamped to −0.4…0.8 m/s and ±1.0 rad/s, and `vy` is
+  ignored.
 
 Add `--dds_interface YOUR_INTERFACE` if needed. It selects the rollout interface
 when `CYCLONEDDS_URI` is unset; the controller and hand driver need matching DDS
