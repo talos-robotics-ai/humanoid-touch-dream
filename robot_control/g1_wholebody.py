@@ -545,6 +545,8 @@ class G1_29_WholeBodyController:
         if self.lin_vel_y_cmd != 0.0 and not self._warned_vy:
             logger_mp.warning("[talos_walk] lateral velocity is not supported; vy is ignored")
             self._warned_vy = True
+        # Report (rt/robot/state) what the walker is commanded with: no vy.
+        self.lin_vel_y_cmd = 0.0
         lowstate = self.lowstate_buffer.GetData()
         q, dq = self._talos_joint_state(lowstate)
         with self.ctrl_lock:
