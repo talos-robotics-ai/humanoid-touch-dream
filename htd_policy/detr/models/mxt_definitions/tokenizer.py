@@ -233,9 +233,19 @@ def _get_finger_patches(input_dim: int) -> List[Tuple[str, int, int, int]]:
 
 
 class FingerPatchTactileEncoder(nn.Module):
-    """CNN-per-patch encoder for a single finger's tactile array."""
-    def __init__(self, input_dim: int, output_dim: int = 64):
+    """CNN-per-patch encoder for a single finger's tactile array.
+
+    DFTP taxels arrive as raw / 4095 in [0, 1]; contact is sparse and small, so at
+    scale 1 the conv/MLP biases dominate and the latent barely depends on touch.
+    ``input_scale`` and ``input_log1p`` map x -> log1p(input_scale * x) (or
+    input_scale * x) before the patches. The EMA teacher is a deepcopy of this
+    module, so student and teacher share the transform. Defaults keep upstream.
+    """
+    def __init__(self, input_dim: int, output_dim: int = 64,
+                 input_scale: float = 1.0, input_log1p: bool = False):
         super().__init__()
+        self.input_scale = float(input_scale)
+        self.input_log1p = bool(input_log1p)
         self.patches = _get_finger_patches(input_dim)
         self.branches = nn.ModuleList()
         branch_out_channels = []
@@ -262,6 +272,10 @@ class FingerPatchTactileEncoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         leading = x.shape[:-1]
         flat = x.reshape(-1, x.shape[-1])
+        if self.input_scale != 1.0:
+            flat = flat * self.input_scale
+        if self.input_log1p:
+            flat = torch.log1p(flat.clamp_min(0))
         B = flat.shape[0]
 
         parts = []
@@ -286,10 +300,13 @@ class FingerTactileTokenizer(BaseTokenizer):
         self,
         input_dim: int = 185,
         output_dim: int = 64,
+        input_scale: float = 1.0,
+        input_log1p: bool = False,
         **kwargs
     ):
         super().__init__()
-        self.net = FingerPatchTactileEncoder(input_dim=input_dim, output_dim=output_dim)
+        self.net = FingerPatchTactileEncoder(input_dim=input_dim, output_dim=output_dim,
+                                             input_scale=input_scale, input_log1p=input_log1p)
         self._output_dim = output_dim
 
     def init_cross_attn(self, embodiment_tokenizer_args, modality: str):
