@@ -50,6 +50,10 @@ EMB_CONFIG=configs/htd/dftp_walk_latent16_tscale.yaml PREFIX=../runs/tscale WAND
 
 # resume an interrupted run: same variables, plus --auto_resume
 scripts/train_htd.sh --auto_resume
+
+# idle-filtered data with a normalization std floor (see below)
+DATA=~/htd_data/processed/white_becker_from_sliding_ruller_filtered PREFIX=../runs/filtered \
+  scripts/train_htd.sh --norm_std_floor 0.01
 ```
 
 The launcher expands to:
@@ -75,6 +79,16 @@ Why these settings:
   in ~8%, vy never); this oversamples timesteps with active velocity commands.
 - **`--train_ratio 0.9`**: nine held-out episodes out of 99 give a usable validation
   signal; upstream's 0.99 would leave one.
+
+**`--norm_std_floor`** (default 0: the computed statistics) sets
+`std = max(std, floor)` element-wise for every proprioception input and every action
+before they build the policy's normalizers; `dataset_stats.pkl` holds the floored values,
+so evaluation and rollout use the same ones, and `all_configs.json` records the flag.
+Tactile (fed raw) and image statistics are not changed. It is for near-constant channels:
+the right arm never moves in our data (pose std about 1 mm), so a 5-9 mm difference on the
+real robot arrives at the policy 6 std from the mean. With `--norm_std_floor 0.01` that
+difference is under one std. The floor is in each channel's own units (m, rad, rad/s, ...),
+and an `--auto_resume` must use the value of the original run.
 
 `--num_steps` is the final step index, not an increment: resuming with the same value
 finishes the original schedule. Run `python train_mxt.py --help` for every option.

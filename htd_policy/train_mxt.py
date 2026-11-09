@@ -18,6 +18,7 @@ from mxt_utils import (
     find_all_hdf5,
     compute_dict_mean,
     set_seed,
+    apply_std_floor,
 ) # data functions
 from policy import make_policy, make_optimizer
 import yaml
@@ -441,6 +442,9 @@ def _prepare_model_configs(args):
             previous = json.load(stream)
         if not isinstance(previous, dict) or previous.get('policy_class') != args['policy_class']:
             raise ValueError('resume policy_class does not match the current policy_class')
+        # normalizers are policy parameters: a resumed run keeps its statistics
+        if previous.get('norm_std_floor', 0.0) != args.get('norm_std_floor', 0.0):
+            raise ValueError('resume norm_std_floor does not match the current --norm_std_floor')
         saved = previous.get('policy_config')
         if not isinstance(saved, dict):
             raise ValueError('resume metadata is missing policy_config')
@@ -537,6 +541,8 @@ def main_train(
                                                                         vel_rebalance_weight_yaw=args['vel_rebalance_weight_yaw'],
                                                                         vel_rebalance_threshold=args['vel_rebalance_threshold'],
                                                             )
+    # the floored stats build the policy normalizers and are saved as dataset_stats.pkl
+    embodiment_stats = apply_std_floor(embodiment_stats, args.get('norm_std_floor', 0.0))
     if args['touch_dreaming']:
         _validate_loaded_dream_embodiments(emb_dict, embodiment_list)
     lr_backbone = 1e-5
@@ -686,6 +692,9 @@ def build_parser(*, policy_class_default='MXT', argv=None):
                         help='Benchmark convolution algorithms to select faster implementations')
     parser.add_argument('--max_validation_batches', type=int, default=52, help='Number of validation batches per evaluation')
     parser.add_argument('--stats_dir', nargs='+', default=None, help='Directories used for normalization statistics; pass training-only directories to exclude validation episodes')
+    parser.add_argument('--norm_std_floor', type=float, default=0.0,
+                        help='Lower bound on the normalization std of proprio observations and actions '
+                             '(element-wise; 0 keeps the computed std)')
     
     parser.add_argument('--lr', default=5e-5, action='store', type=float, help='lr')
     parser.add_argument('--lr_tokenizer', default=5e-5, action='store', type=float, help='lr_tokenizer')
@@ -780,6 +789,8 @@ def _validate_training_inputs(args, parser):
         parser.error('--num_workers must be nonnegative')
     if not 0 < args['train_ratio'] <= 1:
         parser.error('--train_ratio must be in (0, 1]')
+    if not np.isfinite(args['norm_std_floor']) or args['norm_std_floor'] < 0:
+        parser.error('--norm_std_floor must be finite and nonnegative')
     directories = args['dataset_dir']
     counts = {}
 

@@ -499,6 +499,30 @@ def get_norm_stats(dataset_path_list, embodiment_dict):
     
     return all_embodiment_stats, all_episode_len, embodiment_list
 
+def apply_std_floor(stats, floor):
+    """Return stats with std = max(std, floor) for proprio observations and actions.
+
+    Only these keys get a normalizer in the policy (tactile is fed raw, images use
+    ImageNet statistics); dream statistics are left as computed. floor 0 returns
+    stats itself.
+    """
+    floor = float(floor)
+    if not np.isfinite(floor) or floor < 0:
+        raise ValueError(f'std floor must be finite and nonnegative, got {floor}')
+    if floor == 0:
+        return stats
+    floored = dict()
+    for embodiment, groups in stats.items():
+        floored[embodiment] = dict(groups)
+        for group in ('obs', 'action'):
+            floored[embodiment][group] = dict(groups[group])
+            for key, entry in groups[group].items():
+                if group == 'action' or 'proprio' in key:
+                    std = entry['std']
+                    floored[embodiment][group][key] = {**entry, 'std': np.maximum(std, np.asarray(floor, dtype=std.dtype))}
+    return floored
+
+
 KEY_PATH_MAP_G1_INSPIRE_WB = {
     'main_image': '/observations/images/main',
     'left_wrist_image': '/observations/images/wrist_left',

@@ -46,6 +46,8 @@ folder names do not define the train/validation split. The examples use `--min_v
 require at least two episodes. Adjust this and `--train_ratio` for your dataset.
 Normalization uses all supplied episodes; `--stats_dir /path/to/statistics_data`
 selects another corpus, such as training-only episodes.
+`--norm_std_floor 0.01` raises every proprioception and action std below 0.01 to 0.01
+for near-constant channels (default 0 keeps the computed std; see [docs/training.md](../docs/training.md)).
 
 ## Train HTD
 
