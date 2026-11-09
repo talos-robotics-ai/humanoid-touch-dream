@@ -499,6 +499,7 @@ def get_norm_stats(dataset_path_list, embodiment_dict):
     
     return all_embodiment_stats, all_episode_len, embodiment_list
 
+
 def apply_std_floor(stats, floor):
     """Return stats with std = max(std, floor) for proprio observations and actions.
 

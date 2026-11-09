@@ -17,30 +17,42 @@ GROUP = 'g1_inspire_wb/task__manipulation'
 
 
 def _trajectory():
-    """Left-wrist, fingertip, torso and base commands for the synthetic episode."""
+    """Wrist, fingertip, torso and base commands for the synthetic episode.
+
+    Each stretch with the left arm still has exactly one other command moving and
+    is longer than keep_s, so dropping any idle term drops frames from it.
+    """
     rng = np.random.default_rng(0)
     step = 0.1 / FPS  # 0.1 m/s while moving
     wrist_v = np.zeros(N)
+    right_v = np.zeros(N)
     finger_v = np.zeros(N)
+    torso_v = np.zeros(N)
     vel = np.zeros((N, 3))
     wrist_v[45:80] = step          # 0..44 idle at the start (inside the 2 s edge)
     # 80..139 plateau: everything still apart from sub-threshold jitter
     wrist_v[140:150] = step
-    finger_v[150:180] = 0.05 / FPS  # arm still, fingers closing at 5 cm/s
+    finger_v[150:165] = 0.05 / FPS  # fingers closing at 5 cm/s
+    right_v[165:180] = step         # right wrist moving
     wrist_v[180:190] = step
-    vel[190:205, 0] = 0.3           # arm still, walking forward
-    vel[205:220, 2] = 0.5           # arm still, turning
-    wrist_v[220:] = step
+    vel[190:202, 0] = 0.3           # walking forward
+    vel[202:214, 2] = 0.5           # turning
+    vel[214:226, 1] = 0.3           # walking sideways
+    torso_v[226:238] = 0.05 / FPS   # torso moving
+    wrist_v[238:] = step
     left = np.zeros((N, 6))
     left[:, 0] = 0.3 + np.cumsum(wrist_v)
     left[80:140, 0:3] += rng.uniform(-1e-5, 1e-5, size=(60, 3))
+    right = np.tile([0.3, -0.2, 0.1, 0, 0, 0], (N, 1))
+    right[:, 0] += np.cumsum(right_v)
+    body = np.tile([0, 0, 0.75, 0, 0, 0], (N, 1))
+    body[:, 2] += np.cumsum(torso_v)
     tips = np.tile(np.linspace(0.0, 0.1, 15), (N, 1)) + np.cumsum(finger_v)[:, None]
-    return left, tips, vel
+    return left, right, body, tips, vel
 
 
 def _write_episode(path, n=N, misaligned=None):
-    left, tips, vel = _trajectory()
-    left, tips, vel = left[:n], tips[:n], vel[:n]
+    left, right, body, tips, vel = (a[:n] for a in _trajectory())
     ts = np.arange(n) / FPS
     with h5py.File(path, 'w') as f:
         f.attrs['embodiment'] = 'g1_inspire_wb'
@@ -49,10 +61,10 @@ def _write_episode(path, n=N, misaligned=None):
         f.attrs['sim'] = False
         f.attrs['hand_type'] = 'dftp'
         f.create_dataset('actions/left_eef_to_body', data=left)
-        f.create_dataset('actions/right_eef_to_body', data=np.tile([0.3, -0.2, 0.1, 0, 0, 0], (n, 1)))
+        f.create_dataset('actions/right_eef_to_body', data=right)
         f.create_dataset('actions/left_eef_link', data=tips)
         f.create_dataset('actions/right_eef_link', data=np.tile(np.linspace(0, 0.1, 15), (n, 1)))
-        f.create_dataset('actions/body', data=np.tile([0, 0, 0.75, 0, 0, 0], (n, 1)))
+        f.create_dataset('actions/body', data=body)
         f.create_dataset('actions/velocity_commands', data=vel)
         f.create_dataset('actions/eef_to_body', data=np.hstack([left, left]).astype(np.float32),
                          chunks=(64, 12), maxshape=(None, 12), compression='gzip', compression_opts=4)
@@ -171,6 +183,38 @@ def test_misaligned_episode_is_an_error_and_leaves_no_output(tmp_path):
     dst = tmp_path / 'dst'
     assert fif.main(['--src', str(src), '--dst', str(dst)]) == 1
     assert not any(p.is_file() for p in dst.rglob('*'))
+
+
+def _files_under(path):
+    return [os.path.join(root, name) for root, _, names in os.walk(path) for name in names]
+
+
+def test_failed_write_leaves_no_file_or_temporary(task, monkeypatch):
+    src, dst = task
+
+    def fail(*args):
+        raise OSError('disk full')
+
+    monkeypatch.setattr(fif, '_copy_rows', fail)
+    assert fif.main(['--src', str(src), '--dst', str(dst)]) == 1
+    assert _files_under(dst) == []
+
+
+@pytest.mark.parametrize('defect', ['missing_dataset', 'short_dataset'])
+def test_verify_rejects_an_incomplete_episode(task, monkeypatch, defect):
+    src, dst = task
+    write = fif._write_filtered
+
+    def write_with_defect(src_file, dst_file, keep):
+        write(src_file, dst_file, keep)
+        if defect == 'missing_dataset':
+            del dst_file['camera_poses/head_camera_to_init']
+        else:
+            dst_file['actions/eef_to_body'].resize(10, axis=0)
+
+    monkeypatch.setattr(fif, '_write_filtered', write_with_defect)
+    assert fif.main(['--src', str(src), '--dst', str(dst)]) == 1
+    assert _files_under(dst) == []
 
 
 @pytest.mark.parametrize('where', ['inside_src', 'nonempty'])

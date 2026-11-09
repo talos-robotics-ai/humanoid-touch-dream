@@ -145,7 +145,8 @@ episodes (median 1.3 s, longest 7.7 s, 2.2% of all frames), 19 of them within 8 
 pose where the deployed policy froze. A chunked behaviour-cloning policy sees both "stay"
 and "go" from the same state there and averages them.
 [`filter_idle_frames.py`](../data_collect/data_processing/filter_idle_frames.py) writes a
-copy of a processed task directory with these pauses shortened:
+copy of a processed task directory in which every idle run longer than `--keep_s` is
+shortened, these pauses included:
 
 ```bash
 python data_collect/data_processing/filter_idle_frames.py \
@@ -168,16 +169,21 @@ A run of idle frames longer than `--keep_s` (0.3 s) keeps its first 0.3 s and dr
 rest, so the arrival and the departure stay next to each other in the data. The first
 and last `--edge_s` (2 s) of every episode are never dropped: the policy still learns
 to start from and end at rest. Finger motion with a still arm (grasping) and walking or
-turning with a still arm are not idle.
+turning with a still arm are not idle. Only wrist positions are tested, so a wrist rotating
+in place counts as still; on the `white_becker` set the largest wrist rotation across any
+dropped stretch is 1.4 degrees.
 
 The source directory is only read. Each output episode has the source's dataset paths,
 dtypes, storage settings and attributes; the dropped rows are removed from every temporal
 dataset (`actions/`, `observations/` including images and tactile, `camera_poses/`) and
 `masks/` is copied unchanged. The destination must be new or empty and needs about as
 much disk space as the source. `--dry_run` prints the per-episode numbers and the summary
-without writing anything; `--report` also saves them as JSON. Validate the copy as in
-step 3; expect more `timestamp_gap` warnings, since each shortened pause leaves one gap.
-Train on it by pointing `DATA` at the `_filtered` directory.
+without writing anything; `--report` also saves them as JSON (a pause that begins inside
+the first `--edge_s` is reported from the end of that edge). An episode that fails is
+reported and left out of the copy: check that the summary says `errors=0` (exit status 0)
+before training, and remove `--dst` before running again. Validate the copy as in step 3;
+expect more `timestamp_gap` warnings, as most shortened pauses leave one gap in the
+timestamps. Train on it by pointing `DATA` at the `_filtered` directory.
 
 ## Adding your own recordings
 

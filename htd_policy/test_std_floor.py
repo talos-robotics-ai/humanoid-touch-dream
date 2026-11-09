@@ -123,3 +123,14 @@ def test_resume_requires_the_original_floor(train_mxt, tmp_path):
     args = vars(train_mxt.build_parser(argv=argv).parse_args(argv))
     with pytest.raises(ValueError, match='norm_std_floor'):
         train_mxt._prepare_model_configs(args)
+
+
+def test_resume_with_the_original_floor_passes_the_floor_check(train_mxt, tmp_path):
+    (tmp_path / 'all_configs.json').write_text(
+        json.dumps({'policy_class': 'MXT', 'norm_std_floor': 0.01, 'policy_config': {}}))
+    argv = ['--touch_dreaming', '--dataset_dir', str(tmp_path), '--ckpt_dir', 'x', '--task_name', 't',
+            '--resume_training', str(tmp_path), '--norm_std_floor', '0.01']
+    args = vars(train_mxt.build_parser(argv=argv).parse_args(argv))
+    # the next check compares the saved model configuration, which is empty here
+    with pytest.raises(ValueError, match='embodiment_args_dict'):
+        train_mxt._prepare_model_configs(args)

@@ -88,7 +88,9 @@ Tactile (fed raw) and image statistics are not changed. It is for near-constant 
 the right arm never moves in our data (pose std about 1 mm), so a 5-9 mm difference on the
 real robot arrives at the policy 6 std from the mean. With `--norm_std_floor 0.01` that
 difference is under one std. The floor is in each channel's own units (m, rad, rad/s, ...),
-and an `--auto_resume` must use the value of the original run.
+and an `--auto_resume` must use the value of the original run. Losses and normalised
+offline metrics are computed in each run's own normalized units, so they are not
+comparable between runs with different floors.
 
 `--num_steps` is the final step index, not an increment: resuming with the same value
 finishes the original schedule. Run `python train_mxt.py --help` for every option.
