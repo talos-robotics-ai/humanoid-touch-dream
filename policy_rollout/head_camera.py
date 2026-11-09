@@ -173,6 +173,8 @@ def _static_frame(device, width, height):
     frame = cv2.imread(device) if isinstance(device, str) and os.path.isfile(device) else None
     if frame is not None:
         return cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+    if device is not None:
+        print(f'Warning: cannot read head camera image {device!r}; using a grey frame')
     frame = np.full((height, width, 3), 255, dtype=np.uint8)
     frame[20:-20, 20:-20] = 128
     return frame

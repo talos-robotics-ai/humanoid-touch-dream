@@ -553,8 +553,9 @@ class Controller:
     def _supervisor_action(self, action, d, events, now):
         s = self.walker.strategy
         if action == "start_session":
-            # The session starts on the first frame received after this instant.
-            self._fresh_after = now
+            # The session starts on the first frame received after this instant plus a margin:
+            # rollout keeps publishing the old chunk for up to a few ticks after the edge.
+            self._fresh_after = now + G1_SPEC.supervisor.start_frame_margin_s
             self._awaiting_fresh = True
         elif action == "freeze":
             self._end_session_freeze(d.reason)

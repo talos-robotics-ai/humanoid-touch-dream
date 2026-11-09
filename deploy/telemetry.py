@@ -5,7 +5,7 @@ import numpy as np
 from deploy.controller_bridge import TickTimer as LoopTimer
 from deploy.msgs import CameraFrame, PolicyStatus, PredictedChunk
 
-__all__ = ['LoopTimer', 'camera_message', 'chunk_message', 'is_ready', 'policy_status_message']
+__all__ = ['LoopTimer', 'camera_message', 'chunk_message', 'entered_running', 'is_ready', 'policy_status_message']
 
 # Command group -> width, in PredictedChunk field order.
 CHUNK_GROUPS = (('body_pose', 6), ('left_eef_to_body', 6), ('right_eef_to_body', 6),
@@ -54,6 +54,10 @@ def policy_status_message(ready: bool, publishing: bool, inference_ms: float, ch
                         robot_state_age_s=float(robot_age), eef_state_age_s=float(eef_age),
                         camera_age_s=float(camera_age), loop_p50_ms=float(p50), loop_max_ms=float(mx),
                         interval=int(interval), horizon=int(horizon), checkpoint=str(checkpoint), detail=str(detail))
+
+
+def entered_running(prev_state: str | None, new_state: str) -> bool:
+    return new_state == "RUNNING" and prev_state != "RUNNING"
 
 
 def is_ready(warmed_up: bool, ages: tuple, last_inference_ms, budget_ms: float) -> tuple:

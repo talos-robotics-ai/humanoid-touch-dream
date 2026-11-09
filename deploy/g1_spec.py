@@ -43,6 +43,7 @@ class SupervisorSpec:
     policy_status_max_age: float = 1.0
     standing_hold_s: float = 2.0
     manual_release_s: float = 1.0
+    start_frame_margin_s: float = 0.15
 
 
 @dataclass(frozen=True)

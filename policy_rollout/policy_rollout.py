@@ -44,7 +44,7 @@ from mxt_loading import checkpoint_path, load_mxt_policy, mxt_camera_size, mxt_i
 from deploy import dds as deploy_dds
 from deploy.msgs import (TOPIC_CAMERA, TOPIC_POLICY_STATUS, TOPIC_PREDICTED_CHUNK, TOPIC_SUPERVISOR,
                          CameraFrame, PolicyStatus, PredictedChunk, SupervisorStatus)
-from deploy.telemetry import (MISSING_AGE_S, LoopTimer, camera_message, chunk_message, is_ready,
+from deploy.telemetry import (MISSING_AGE_S, LoopTimer, camera_message, chunk_message, entered_running, is_ready,
                               policy_status_message)
 
 # Tactile key -> (hand, start, end) for slicing full 1062-dim tactile
@@ -510,7 +510,11 @@ class HTDPolicyRollout:
     def _telemetry_status_thread(self):
         """--supervisor: PolicyStatus at 5 Hz."""
         budget_ms = 0.5 * 1000 * self.infer_interval / self.args.control_freq
-        checkpoint = checkpoint_path(self.args.model_path, self.args.checkpoint)
+        try:
+            checkpoint = checkpoint_path(self.args.model_path, self.args.checkpoint)
+        except Exception as e:
+            print(f'Telemetry: cannot resolve the checkpoint path ({e})')
+            checkpoint = ''
         while self.running:
             try:
                 ages = self._input_ages()
@@ -546,13 +550,13 @@ class HTDPolicyRollout:
                 for sample in self.reader_supervisor.take(N=4):
                     if sample is None or not hasattr(sample, 'state'):
                         continue
-                    if self._supervisor_state != "RUNNING" and sample.state == "RUNNING":
+                    if entered_running(self._supervisor_state, sample.state):
                         self._restart_chunk.set()
                         print("Supervisor entered RUNNING: restarting the chunk")
                     self._supervisor_state = sample.state
             except Exception as e:
                 self._telemetry_error('supervisor listener', e)
-            time.sleep(0.005)
+            time.sleep(0.02)
     
     def init_dds_robot_state_subscriber(self):
         """Initialize DDS subscriber for robot state"""
@@ -998,7 +1002,8 @@ class HTDPolicyRollout:
             if result is not None:
                 traj, _, seconds = result
                 self._inference_ms.append(1000 * seconds)
-                if self.supervisor:
+                # Racy int read is fine: a stale generation only means the chunk is not published.
+                if self.supervisor and gen == self.scheduler.generation:
                     try:
                         self.writer_chunk.write(chunk_message(traj, t_obs, self.infer_interval,
                                                               1000 * seconds, time.time()))

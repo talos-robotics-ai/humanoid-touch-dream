@@ -1,5 +1,5 @@
 import numpy as np, pytest, cv2
-from deploy.telemetry import camera_message, chunk_message, is_ready
+from deploy.telemetry import camera_message, chunk_message, entered_running, is_ready
 
 def traj(H=60):
     return {'body_pose': np.zeros((H, 6)), 'left_eef_to_body': np.ones((H, 6)), 'right_eef_to_body': np.zeros((H, 6)),
@@ -32,3 +32,7 @@ def test_is_ready_names_the_first_missing_condition():
     assert is_ready(True, (0.1, 0.1, 2.0), 5.0, 750.0) == (False, "no camera frame")
     assert is_ready(True, (0.1, 0.1, 0.1), 900.0, 750.0) == (False, "inference slow")
     assert is_ready(True, (0.1, 0.1, 0.1), None, 750.0) == (True, "ready")
+
+def test_entered_running_only_on_the_edge():
+    assert entered_running(None, "RUNNING") and entered_running("HOLD", "RUNNING")
+    assert not entered_running("RUNNING", "RUNNING") and not entered_running("RUNNING", "HOLD")

@@ -132,7 +132,7 @@ class Rig:
     def to_running(self):
         self.to_ready()
         self.c._ui_cmds.append("start")
-        self.tick(2)
+        self.tick(10)                   # past the start-frame margin
         assert self.state is State.RUNNING and self.c.session
 
 
@@ -147,8 +147,20 @@ def test_start_waits_for_a_frame_newer_than_the_start(rig):
     calls = rig.tick(frames=False)
     assert rig.state is State.RUNNING and not rig.c.session
     assert ("engage",) not in calls and ("walk", 0.0, 0.0) in calls
+    rig.tick(7)                         # inside the start-frame margin
+    assert not rig.c.session
     calls = rig.tick()
     assert rig.c.session and ("engage",) in calls and ("arm_wd",) in calls
+
+
+def test_start_ignores_frames_for_the_margin(rig):
+    rig.to_ready()
+    rig.c._ui_cmds.append("start")
+    rig.tick(frames=False)
+    rig.tick(2)                         # frame 0.04 s after the start edge
+    assert not rig.c.session
+    rig.tick(8)                         # frame 0.20 s after
+    assert rig.c.session
 
 
 def test_start_without_a_new_frame_holds_after_the_policy_timeout(rig):
@@ -157,7 +169,7 @@ def test_start_without_a_new_frame_holds_after_the_policy_timeout(rig):
     rig.tick(frames=False)
     rig.tick(20, frames=False)          # 0.4 s: still waiting
     assert rig.state is State.RUNNING
-    rig.tick(10, frames=False)
+    rig.tick(15, frames=False)
     assert rig.state is State.HOLD and not rig.c.session
 
 
@@ -247,7 +259,7 @@ def test_refused_engage_goes_to_hold(rig):
     rig.to_ready()
     rig.c.walker.engages = False
     rig.c._ui_cmds.append("start")
-    rig.tick(2)
+    rig.tick(9)
     assert not rig.c.session
     rig.tick()
     assert rig.state is State.HOLD
