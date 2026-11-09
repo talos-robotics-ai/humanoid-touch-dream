@@ -40,6 +40,14 @@ Lifecycle, the teleop backend's under ``--lower jetson``:
 
 Keyboard (Enter after each): ``s`` stop and hold, ``g`` accept the policy
 again, ``q`` quit.
+
+``--supervisor on`` hands these decisions to ``deploy.supervisor``
+(docs/superpowers/specs/2026-11-09-deploy-supervisor-ui-design.md): the
+policy drives the robot only once the robot stands, the policy is ready and
+the operator starts it (Unitree remote, UI, ``deploy/ui/cmd.py``); a stop
+sets the walk to zero and holds the arms and torso where they are; the sticks
+take the legs over at any time. Keyboard there: ``s`` stop, ``g`` re-arm,
+``r`` reset, ``q`` quit.
 """
 import argparse
 import logging
@@ -53,16 +61,26 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.dirname(HERE))
 import paths  # noqa: E402
 from commands import (TORSO_ATTITUDE_MODES, WalkGate, parse_teleop_data,  # noqa: E402
                       torso_command, walk_command)
 from shaping import ArmShaper, Glide, TorsoEngage  # noqa: E402
+from deploy import dds, remote  # noqa: E402
+from deploy.controller_bridge import (TickTimer, UiCommandFilter, standing_sample,  # noqa: E402
+                                      status_message)
+from deploy.g1_spec import G1_SPEC  # noqa: E402
+from deploy.msgs import (TOPIC_POLICY_STATUS, TOPIC_SUPERVISOR, TOPIC_UI_COMMAND,  # noqa: E402
+                         PolicyStatus, SupervisorStatus, UiCommand)
+from deploy.standing import StandingCheck  # noqa: E402
+from deploy.supervisor import Inputs, State, Supervisor, classify_fault  # noqa: E402
 
 TOPIC_TELEOP = "rt/teleop/synchronized_data"
 TOPIC_RESET = "rt/robot/reset_command"
 TOPIC_STATE = "rt/robot/state"
 TOPIC_EEF = "rt/robot/eef_state"
 TOPIC_TOUCH = ("rt/inspire_hand/touch/l", "rt/inspire_hand/touch/r")
+SUPERVISOR_KEYS = {"s": "stop", "g": "rearm", "r": "reset"}
 
 
 def parse_args(argv=None):
@@ -93,6 +111,18 @@ def parse_args(argv=None):
                     help="drive the robot even on battery or a power-saving profile (not recommended)")
     ap.add_argument("--hands", default="modbus", choices=("modbus", "none"),
                     help="none runs without the Inspire hands (no eef_state, no touch)")
+    ap.add_argument("--supervisor", default="off", choices=("on", "off"),
+                    help="on: the deployment supervisor decides when the policy drives the "
+                         "robot (start/stop from the remote, the UI or deploy/ui/cmd.py); "
+                         "off: a session starts on the first policy frame")
+    ap.add_argument("--walk", default="on", choices=("on", "off"),
+                    help="off: the policy's walk command is replaced by zero for the whole run")
+    ap.add_argument("--manual_walk", default="off", choices=("on", "off"),
+                    help="supervisor: on lets the remote's sticks walk the robot in MANUAL; "
+                         "off still enters MANUAL on a deflection but sends walk zero")
+    ap.add_argument("--log_file", default=None,
+                    help="also write the log here (supervisor default: "
+                         "<repo>/logs/deploy_<YYYYmmdd_HHMMSS>.log)")
     return ap.parse_args(argv)
 
 
@@ -160,6 +190,7 @@ class Controller:
         self._arms_home = False
         self._last_arm_cmd = None
         self._said = set()
+        self._stop_request = False      # becomes a supervisor stop on the next tick
 
         # Everything slow to build comes before the walker link: once linked,
         # this process must answer the walker every 0.25 s or it stands itself.
@@ -170,11 +201,13 @@ class Controller:
         zeros = np.zeros(model.nv)
         self.gravity = lambda q: np.asarray(pin.rnea(model, data, np.asarray(q, float),
                                                      zeros, zeros)).copy()
+        def on_arms_refused(label):
+            logger.critical("[g1_walk] the %s have refused every command for %d frames"
+                            % (label, ARM_HOLD_MAX))
+            self._stop_request = True
         guard = JointJumpGuard(
             arm_jump_thresholds(psi_float("PSI_G1_ARM_JUMP_SCALE", "1.0")), "g1_walk", "arms",
-            max_hold_steps=ARM_HOLD_MAX,
-            on_expire=lambda label: logger.critical(
-                "[g1_walk] the %s have refused every command for %d frames" % (label, ARM_HOLD_MAX)))
+            max_hold_steps=ARM_HOLD_MAX, on_expire=on_arms_refused)
         self.arms = ArmShaper(guard, self.gravity, JUMP_CREEP_RAD, self.dt, args.arm_max_vel,
                               engage_s, psi_float("PSI_ENGAGE_VEL", "1.0"),
                               psi_float("PSI_ENGAGE_MAX_S", "4.0"))
@@ -202,6 +235,27 @@ class Controller:
             self.writer_eef = DataWriter(self.dds, Topic(self.dds, TOPIC_EEF, EEFState))
             self.writer_touch = [DataWriter(self.dds, Topic(self.dds, t, inspire_dds.inspire_hand_touch))
                                  for t in TOPIC_TOUCH]
+
+        self.sup = None
+        if args.supervisor == "on":
+            from teleop.robot_control.robot_body import LowStateStale
+            self._lowstate_stale = LowStateStale
+            self.sup = Supervisor(G1_SPEC.supervisor, time.monotonic())
+            self.standing_check = StandingCheck(G1_SPEC.standing)
+            self.remote_in = remote.RemoteInput(G1_SPEC.remote)
+            self.ui_filter = UiCommandFilter(G1_SPEC.supervisor.ui_command_max_age)
+            self.ticks = TickTimer()
+            self._ui_cmds = []              # under self._frame_lock, as the next two
+            self._kb_cmds = []
+            self._torso_pose = None         # (pose, monotonic time), from _publish_state_loop
+            self._policy_status = None
+            self._last_log = ""
+            self._sup_view = None           # the last tick's decision and inputs, for the status
+            self._awaiting_fresh = False    # RUNNING until a frame newer than the start arrives
+            self._manual_engaged = False
+            self.reader_ui = dds.reader(self.dds, TOPIC_UI_COMMAND, UiCommand)
+            self.reader_policy = dds.reader(self.dds, TOPIC_POLICY_STATUS, PolicyStatus)
+            self.writer_sup = dds.writer(self.dds, TOPIC_SUPERVISOR, SupervisorStatus)
 
     # -- latches ---------------------------------------------------------------
     def estop(self, reason="operator"):
@@ -263,6 +317,20 @@ class Controller:
         for sample in self.reader_reset.take(N=4):
             if isinstance(sample, reset_type) and sample.reset_requested:
                 self._reset_pending.set()
+        if self.sup is None:
+            return
+        for sample in self.reader_ui.take(N=8):
+            if not isinstance(sample, UiCommand):
+                continue
+            name = self.ui_filter.accept(sample, time.time())
+            if name is not None:
+                self.log.info("[supervisor] %s from %s" % (name, sample.source))
+                with self._frame_lock:
+                    self._ui_cmds.append(name)
+        for sample in self.reader_policy.take(N=4):
+            if isinstance(sample, PolicyStatus):
+                with self._frame_lock:
+                    self._policy_status = sample
 
     def _fresh_frame(self, now):
         with self._frame_lock:
@@ -274,7 +342,10 @@ class Controller:
     def _keyboard_loop(self):
         for line in sys.stdin:
             key = line.strip().lower()
-            if key == "s":
+            if self.sup is not None and key in SUPERVISOR_KEYS:
+                with self._frame_lock:
+                    self._kb_cmds.append(SUPERVISOR_KEYS[key])
+            elif key == "s":
                 with self._lock:
                     self.operator_hold = True
                     if self.session:
@@ -306,6 +377,13 @@ class Controller:
                 next_t = time.monotonic()
 
     def _tick(self, now):
+        if self.sup is not None:
+            t0 = time.perf_counter()
+            try:
+                self._supervisor_tick(now)
+            finally:
+                self.ticks.add(time.perf_counter() - t0, now)
+            return
         fault = self.fault()
         if self._reset_pending.is_set():
             self._reset_pending.clear()
@@ -342,7 +420,8 @@ class Controller:
             self._say_once("vy", "[g1_walk] the policy asks for vy %.2f m/s; the walker has "
                            "no lateral axis and it is dropped" % frame.velocity[1])
         vx, wz = walk_command(frame, s.vx_range, s.wz_range)
-        vx, wz, release = self.gate.step(vx, wz, allowed=self.walker.live)
+        vx, wz, release = self.gate.step(vx, wz,
+                                         allowed=self.walker.live and self.args.walk == "on")
         if release:
             s.resume()
             self.log.info("[g1_walk] the policy asked for rest -- it walks the robot now")
@@ -403,6 +482,133 @@ class Controller:
         self._open_hands.set()
         self.resetting = True
 
+    # -- the supervisor (--supervisor on) ----------------------------------------------
+    def _supervisor_tick(self, now):
+        """One supervisor step on what the other threads already decoded, then
+        the commands of the state it is in."""
+        spec = G1_SPEC.standing
+        fault = self.fault()
+        age = self.body.lowstate_age()
+        stale = age > spec.lowstate_max_age
+        snap = remote.snapshot(self.body.remote_controller, stale)
+        events = self.remote_in.update(snap, now)
+        try:
+            gyro = self.body.get_imu_data().gyroscope
+        except self._lowstate_stale:
+            gyro = None
+        with self._frame_lock:
+            pose, status = self._torso_pose, self._policy_status
+            ui, kb = tuple(self._ui_cmds), list(self._kb_cmds)
+            self._ui_cmds.clear()
+            self._kb_cmds.clear()
+        torso = pose[0] if pose is not None and now - pose[1] <= spec.lowstate_max_age else None
+        walker_live = self.walker.live
+        standing = self.standing_check.update(standing_sample(
+            walker_live, torso, gyro, self.body.get_current_motor_dq(), age, spec), now)
+        policy_ready = (status is not None and status.ready and time.time() - status.timestamp
+                        <= G1_SPEC.supervisor.policy_status_max_age)
+        if self._reset_pending.is_set():
+            self._reset_pending.clear()
+            kb.append("reset")
+        if self._stop_request:
+            self._stop_request = False
+            kb.append("stop")
+        frame = self._fresh_frame(now)
+        # As _may_start: no frame counts while the arms glide home.
+        frame_fresh = self._home_glide is None and not self.resetting and (frame is not None or (
+            self._awaiting_fresh and now - self._fresh_after <= self.args.policy_timeout))
+        d = self.sup.step(Inputs(walker_live=walker_live, fault=fault, standing=standing,
+                                 policy_ready=policy_ready, frame_fresh=frame_fresh,
+                                 remote=events, ui=ui, keyboard=tuple(kb),
+                                 lowstate_stale=stale), now)
+        for line in d.log:
+            self.log.info(line)
+            self._last_log = line
+        for action in d.actions:
+            self._supervisor_action(action, d, events, now)
+        self._sup_view = (d, standing, events, snap, policy_ready, frame_fresh, walker_live, fault)
+
+        state = self.sup.state
+        if state is State.ESTOP:
+            return              # the walker's own latch holds the robot
+        if state is State.RUNNING:
+            if self._awaiting_fresh:
+                frame = self._fresh_frame(now)
+                if frame is not None:
+                    self._begin_running(now)
+            if self.session and frame is not None:
+                self._session_tick(frame, now)
+                return
+        self._tick_between(now)
+        if state is not State.MANUAL:
+            self.walker.strategy.set_walk_command(0.0, 0.0)
+
+    def _supervisor_action(self, action, d, events, now):
+        s = self.walker.strategy
+        if action == "start_session":
+            # The session starts on the first frame received after this instant.
+            self._fresh_after = now
+            self._awaiting_fresh = True
+        elif action == "freeze":
+            self._end_session_freeze(d.reason)
+        elif action == "stand":
+            if classify_fault(self.fault()) == "link":
+                # Lifted as a session start lifts it, and not policed until
+                # the next session or MANUAL arms it again.
+                self.body.arm_link_watchdog()
+                self.body.disarm_link_watchdog()
+            s.stand()
+        elif action == "engage_manual":
+            self._manual_engaged = self.walker.engage()
+            if self._manual_engaged:
+                self.body.arm_link_watchdog()
+                s.resume()
+            else:
+                self.log.critical("[g1_walk] the walker did not engage for manual walking; "
+                                  "the walk stays zero")
+        elif action == "manual_walk":
+            vx = wz = 0.0
+            if self.args.manual_walk == "on" and self._manual_engaged:
+                vx = float(np.clip(events.manual_vx, *s.vx_range))
+                wz = float(np.clip(events.manual_wz, *s.wz_range))
+            s.set_walk_command(vx, wz)
+        elif action == "reset":
+            self._start_reset()     # no session here: a RUNNING one was frozen first
+
+    def _begin_running(self, now):
+        """The first fresh frame in RUNNING: today's session start. A glide
+        home still under way ends; the arms engage from its last command."""
+        self._awaiting_fresh = False
+        self._home_glide = None
+        self.resetting = False
+        self._start_session(now)
+        if not self.session:
+            self._stop_request = True
+
+    def _end_session_freeze(self, why):
+        """``_end_session(why, glide_home=False)`` without the walker's
+        ``stand()``: the walk goes to zero, the torso and arm commands stay
+        where they are (decision A)."""
+        self.session = False
+        self._awaiting_fresh = False
+        self._manual_engaged = False
+        self._arms_home = False         # _tick_between must not send home over the held arms
+        self.walker.strategy.set_walk_command(0.0, 0.0)
+        self.gate.rearm()
+        self.body.disarm_link_watchdog()
+        self.body.reset(hold_pose=False)
+        self.log.warning("[g1_walk] frozen (%s): walk zero, the arms and torso hold" % why)
+
+    def _publish_supervisor_status(self):
+        view = self._sup_view
+        if view is None:
+            return
+        d, standing, events, snap, ready, fresh, live, fault = view
+        self.writer_sup.write(status_message(
+            self.sup, d, standing, events, snap, ready, fresh, live, fault,
+            self.args.walk == "on", self.args.manual_walk == "on",
+            self.ticks.stats(time.monotonic()), self._last_log, time.time()))
+
     # -- between sessions: the arms' glide home ----------------------------------------
     def _start_home_glide(self, launch=False):
         """``G1Backend._start_arm_home``: from the last command on the wire (the
@@ -449,7 +655,7 @@ class Controller:
             try:
                 if self._open_hands.is_set():
                     self.hands.open()
-                elif self.session:
+                elif self.session and (self.sup is None or self.sup.state is State.RUNNING):
                     frame = self._fresh_frame(t0)
                     if frame is not None:
                         self.hands.command(frame.left_hand, frame.right_hand)
@@ -462,16 +668,28 @@ class Controller:
         from teleop.robot_control.robot_body import LowStateStale
         from robot_state import robot_state_message
         period = 1.0 / float(self.args.publish_freq)
+        status_every = max(1, int(round(self.args.publish_freq / 10.0)))   # SupervisorStatus at 10 Hz
+        n = 0
         while not self.quit.is_set():
             t0 = time.monotonic()
             try:
-                self.writer_state.write(robot_state_message(
-                    self.estimate, self.body, self.walker.strategy.walk_command))
+                msg = robot_state_message(self.estimate, self.body, self.walker.strategy.walk_command)
+                if self.sup is not None:
+                    with self._frame_lock:
+                        self._torso_pose = (np.asarray(msg.torso_pose, float), t0)
+                self.writer_state.write(msg)
             except LowStateStale as e:
                 self._say_once("stale", "[g1_walk] robot state not published: %s" % e)
             except Exception:
                 self._say_once("state", "[g1_walk] publishing rt/robot/state failed "
                                "(logged once)", exc=True)
+            n += 1
+            if self.sup is not None and n % status_every == 0:
+                try:
+                    self._publish_supervisor_status()
+                except Exception:
+                    self._say_once("sup_status", "[g1_walk] publishing the supervisor status "
+                                   "failed (logged once)", exc=True)
             time.sleep(max(0.0, period - (time.monotonic() - t0)))
 
     def _publish_hands_loop(self):
@@ -517,8 +735,12 @@ class Controller:
         s = self.walker.strategy
         self.log.info("[g1_walk] the walker's command box: vx %s m/s, wz %s rad/s, torso "
                       "height travel %s m" % (s.vx_range, s.wz_range, s.h_range))
-        print("READY: g1_walk controller: the walker is live; sessions start on the "
-              "policy's frames (s stop, g go, q quit)", flush=True)
+        if self.sup is not None:
+            print("READY: g1_walk controller (supervisor): the walker is live; waiting for the "
+                  "robot to stand and the policy to be ready", flush=True)
+        else:
+            print("READY: g1_walk controller: the walker is live; sessions start on the "
+                  "policy's frames (s stop, g go, q quit)", flush=True)
         self.quit.wait()
         return 0
 
@@ -537,13 +759,22 @@ class Controller:
         self.walker.detach()
 
 
-def configure_logging():
+def configure_logging(log_file=None):
     """One line per record. The teleop's logger has a handler of its own,
     and the teleop's Inspire driver logs on the root logger, which then
-    configures itself and would print every teleop record a second time."""
+    configures itself and would print every teleop record a second time.
+    ``log_file`` gets the records of both."""
     from teleop.utils.logger import logger as teleop_logger
     teleop_logger.propagate = False
-    logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s")
+    fmt = "[%(asctime)s] [%(levelname)s] %(message)s"
+    logging.basicConfig(level=logging.INFO, format=fmt)
+    if log_file:
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        handler = logging.FileHandler(log_file)
+        handler.setFormatter(logging.Formatter(fmt))
+        teleop_logger.addHandler(handler)
+        logging.getLogger().addHandler(handler)
+        teleop_logger.info("[g1_walk] logging to %s" % log_file)
 
 
 def main(argv=None):
@@ -561,10 +792,16 @@ def main(argv=None):
             return 2
         print("WARNING: not set up for real-time control: %s" % "; ".join(problems),
               file=sys.stderr, flush=True)
+    log_file = args.log_file
+    if log_file is None and args.supervisor == "on":
+        log_file = os.path.join(os.path.dirname(HERE), "logs",
+                                time.strftime("deploy_%Y%m%d_%H%M%S.log"))
+    if log_file is not None:
+        log_file = os.path.abspath(log_file)     # before the working directory changes
     os.environ["PSI_DDS_IFACE"] = args.iface
     paths.add_teleop()
     paths.enter_htd_robot_control()
-    configure_logging()
+    configure_logging(log_file)
     ctrl = Controller(args)
 
     def _on_signal(signum, frame):
