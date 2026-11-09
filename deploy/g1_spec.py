@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 _POLICY_ROLLOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "policy_rollout")
 if _POLICY_ROLLOUT not in sys.path:
-    sys.path.insert(0, _POLICY_ROLLOUT)
+    sys.path.append(_POLICY_ROLLOUT)
 from g1_command import EEF_POSITION_OFFSET, TORSO_HEIGHT_OFFSET  # noqa: E402
 
 
@@ -43,6 +43,9 @@ class SupervisorSpec:
     policy_status_max_age: float = 1.0
     standing_hold_s: float = 2.0
     manual_release_s: float = 1.0
+    # Frames older than the RUNNING edge plus this are not the restarted chunk. Budget: the
+    # transition's status write ~1 ms + rollout's listener poll <= 20 ms + DDS ~3 ms + one
+    # rollout tick 33 ms = ~57 ms, so 0.15 s leaves ~90 ms of slack.
     start_frame_margin_s: float = 0.15
 
 

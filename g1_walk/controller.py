@@ -52,6 +52,7 @@ take the legs over at any time. Keyboard there: ``s`` stop, ``g`` re-arm,
 ``r`` reset, ``q`` quit.
 """
 import argparse
+import collections
 import logging
 import os
 import signal
@@ -72,8 +73,8 @@ from deploy import dds, remote  # noqa: E402
 from deploy.controller_bridge import (TickTimer, UiCommandFilter, standing_sample,  # noqa: E402
                                       status_message)
 from deploy.g1_spec import G1_SPEC  # noqa: E402
-from deploy.msgs import (TOPIC_POLICY_STATUS, TOPIC_SUPERVISOR, TOPIC_UI_COMMAND,  # noqa: E402
-                         PolicyStatus, SupervisorStatus, UiCommand)
+from deploy.msgs import (RECENT_LOG_LINES, TOPIC_POLICY_STATUS, TOPIC_SUPERVISOR,  # noqa: E402
+                         TOPIC_UI_COMMAND, PolicyStatus, SupervisorStatus, UiCommand)
 from deploy.standing import StandingCheck  # noqa: E402
 from deploy.supervisor import Inputs, State, Supervisor, classify_fault  # noqa: E402
 
@@ -259,6 +260,7 @@ class Controller:
         self._torso_pose = None         # (pose, monotonic time), from _publish_state_loop
         self._policy_status = None
         self._last_log = ""
+        self._recent_log = collections.deque(maxlen=RECENT_LOG_LINES)   # control thread only
         self._sup_view = None           # the last tick's decision and inputs, for the status
         self._awaiting_fresh = False    # RUNNING until a frame newer than the start arrives
         self._manual_engaged = False
@@ -503,8 +505,12 @@ class Controller:
         events = self.remote_in.update(snap, now)
         try:
             gyro = self.body.get_imu_data().gyroscope
-        except self._lowstate_stale:
+        except (AttributeError, self._lowstate_stale):
             gyro = None
+        try:
+            leg_dq = self.body.get_current_motor_dq()
+        except (AttributeError, self._lowstate_stale):     # no rt/lowstate yet: the sample fails safe
+            leg_dq = None
         with self._frame_lock:
             pose, status = self._torso_pose, self._policy_status
             ui, kb = tuple(self._ui_cmds), list(self._kb_cmds)
@@ -513,7 +519,7 @@ class Controller:
         torso = pose[0] if pose is not None and now - pose[1] <= spec.lowstate_max_age else None
         walker_live = self.walker.live
         standing = self.standing_check.update(standing_sample(
-            walker_live, torso, gyro, self.body.get_current_motor_dq(), age, spec), now)
+            walker_live, torso, gyro, leg_dq, age, spec), now)
         policy_ready = (status is not None and status.ready and time.time() - status.timestamp
                         <= G1_SPEC.supervisor.policy_status_max_age)
         if self._reset_pending.is_set():
@@ -534,9 +540,19 @@ class Controller:
         for line in d.log:
             self.log.info(line)
             self._last_log = line
+            self._recent_log.append(line)
         for action in d.actions:
             self._supervisor_action(action, d, events, now)
-        self._sup_view = (d, standing, events, snap, policy_ready, frame_fresh, walker_live, fault)
+        self._sup_view = (d, standing, events, snap, policy_ready, frame_fresh, walker_live, fault,
+                          tuple(self._recent_log))
+        if d.changed:
+            # One extra write on a transition, besides the 10 Hz one: the RUNNING edge reaches
+            # rollout within its listener poll, inside start_frame_margin_s.
+            try:
+                self._publish_supervisor_status()
+            except Exception:
+                self._say_once("sup_status_edge", "[g1_walk] publishing the supervisor status "
+                               "on a transition failed (logged once)", exc=True)
 
         state = self.sup.state
         if state is State.ESTOP:
@@ -626,11 +642,11 @@ class Controller:
         view = self._sup_view
         if view is None:
             return
-        d, standing, events, snap, ready, fresh, live, fault = view
+        d, standing, events, snap, ready, fresh, live, fault, recent_log = view
         self.writer_sup.write(status_message(
             self.sup, d, standing, events, snap, ready, fresh, live, fault,
             self.args.walk == "on", self.args.manual_walk == "on",
-            self.ticks.stats(time.monotonic()), self._last_log, time.time()))
+            self.ticks.stats(time.monotonic()), self._last_log, recent_log, time.time()))
 
     # -- between sessions: the arms' glide home ----------------------------------------
     def _start_home_glide(self, launch=False):

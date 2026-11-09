@@ -43,7 +43,7 @@ class UiCommandFilter:
     def accept(self, cmd: UiCommand, now_wall: float) -> str | None:
         # A nonce is forgotten once its command is too old to pass the age check anyway.
         self._seen = {n: t for n, t in self._seen.items() if now_wall - t <= self.max_age_s}
-        if cmd.command not in UI_COMMANDS or not now_wall - cmd.timestamp <= self.max_age_s:
+        if cmd.command not in UI_COMMANDS or not 0.0 <= now_wall - cmd.timestamp <= self.max_age_s:
             return None
         if cmd.nonce in self._seen:
             return None
@@ -75,8 +75,9 @@ def status_message(sup: Supervisor, decision: Decision, standing: StandingReport
                    events: RemoteEvents, snap: RemoteSnapshot, policy_ready: bool,
                    frame_fresh: bool, walker_live: bool, fault: str | None, walk_enabled: bool,
                    manual_walk_enabled: bool, tick_stats: tuple[float, float], last_log: str,
-                   now_wall: float, now_mono: float | None = None) -> SupervisorStatus:
-    """`now_mono` is the supervisor's clock (time.monotonic) for the time in state."""
+                   recent_log, now_wall: float, now_mono: float | None = None) -> SupervisorStatus:
+    """`recent_log`: the supervisor's last log lines, oldest first.
+    `now_mono` is the supervisor's clock (time.monotonic) for the time in state."""
     if now_mono is None:
         now_mono = time.monotonic()
     p50, mx = tick_stats
@@ -100,4 +101,5 @@ def status_message(sup: Supervisor, decision: Decision, standing: StandingReport
         manual_vx=float(events.manual_vx), manual_wz=float(events.manual_wz),
         tick_p50_ms=float(p50), tick_max_ms=float(mx),
         log_line=last_log,
+        recent_log=list(recent_log),
     )

@@ -1,5 +1,5 @@
 import numpy as np, pytest, cv2
-from deploy.telemetry import camera_message, chunk_message, entered_running, is_ready
+from deploy.telemetry import MISSING_AGE_S, camera_message, chunk_message, entered_running, is_ready, observations_present
 
 def traj(H=60):
     return {'body_pose': np.zeros((H, 6)), 'left_eef_to_body': np.ones((H, 6)), 'right_eef_to_body': np.zeros((H, 6)),
@@ -36,3 +36,10 @@ def test_is_ready_names_the_first_missing_condition():
 def test_entered_running_only_on_the_edge():
     assert entered_running(None, "RUNNING") and entered_running("HOLD", "RUNNING")
     assert not entered_running("RUNNING", "RUNNING") and not entered_running("RUNNING", "HOLD")
+
+def test_observations_present_needs_every_input_fresh():
+    assert observations_present((0.0, 0.5, 1.0))
+    assert not observations_present((MISSING_AGE_S, 0.1, 0.1))
+    assert not observations_present((0.1, 0.1, MISSING_AGE_S))
+    assert not observations_present((0.1, 1.5, 0.1))
+    assert not observations_present((0.1, float('nan'), 0.1))

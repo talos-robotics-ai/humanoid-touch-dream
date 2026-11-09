@@ -107,6 +107,8 @@ class Rig:
         c.walker = Walker(self.calls)
         c.body = c.walker.body
         c._init_supervisor(Stale)
+        self.status = []                # SupervisorStatus messages written
+        c.writer_sup = types.SimpleNamespace(write=self.status.append)
         self.c = c
 
     def tick(self, n=1, frames=True, dt=0.02):
@@ -291,3 +293,33 @@ def test_reset_restarts_the_standing_hold(rig):
     assert rig.state is State.STABILIZING and not rig.c.resetting
     rig.tick(16)
     assert rig.state is State.READY
+
+
+def test_a_state_change_writes_the_status_at_once(rig):
+    rig.to_ready()
+    assert [m.state for m in rig.status] == ["STABILIZING", "READY"]    # one write per transition
+    rig.tick(5)
+    assert len(rig.status) == 2                                          # none without a transition
+    rig.c._ui_cmds.append("start")
+    rig.tick()
+    assert rig.status[-1].state == "RUNNING" and len(rig.status) == 3
+
+
+def test_the_status_carries_the_recent_log_lines(rig):
+    rig.to_ready()
+    log = list(rig.status[-1].recent_log)
+    assert log == ["[supervisor] BOOT -> STABILIZING: walker live",
+                   "[supervisor] STABILIZING -> READY: standing 2.0 s, policy ready, frames fresh",
+                   "HTDPOLICY READY TO DEPLOY"]
+    for _ in range(15):
+        rig.c._ui_cmds.append("reset")
+        rig.tick(2)
+    assert len(rig.c._recent_log) == 12 and rig.c._recent_log[-1].endswith(": reset")
+
+
+def test_no_motor_state_yet_fails_the_standing_check_safe(rig):
+    def no_lowstate():
+        raise AttributeError("'NoneType' object has no attribute 'motor_state'")
+    rig.c.body.get_current_motor_dq = no_lowstate
+    rig.tick(120)
+    assert rig.state is State.STABILIZING

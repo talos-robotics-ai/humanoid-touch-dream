@@ -7,7 +7,7 @@ import numpy as np
 
 _POLICY_ROLLOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "policy_rollout")
 if _POLICY_ROLLOUT not in sys.path:
-    sys.path.insert(0, _POLICY_ROLLOUT)
+    sys.path.append(_POLICY_ROLLOUT)
 from g1_command import UNIFIED_TO_UNITREE_EEF_ROT_REMAP, rpy_to_rot_mat  # noqa: E402
 
 SERIES = ("left_hand_x", "left_hand_y", "left_hand_z", "right_hand_x", "right_hand_y", "right_hand_z",

@@ -117,6 +117,8 @@ _TABLE = (
     ({State.STABILIZING}, State.READY,
      lambda c: "standing %.1f s, policy ready, frames fresh" % c.i.standing.held_s if c.ok else None,
      lambda f: ("log_ready",)),
+    # Reset before the lost row: a reset in the tick a condition drops must still reset.
+    ({State.READY}, State.STABILIZING, lambda c: "reset" if c.reset else None, lambda f: ("reset",)),
     ({State.READY}, State.STABILIZING, lambda c: None if c.ok else _lost(c), lambda f: ()),
     ({State.READY}, State.RUNNING, lambda c: "start" if c.start else None, lambda f: ("start_session",)),
     ({State.RUNNING}, State.HOLD, _running_exit, lambda f: ("freeze",)),
@@ -124,7 +126,7 @@ _TABLE = (
     ({State.HOLD}, State.STABILIZING, lambda c: "re-arm" if c.rearm else None, lambda f: ("stand",)),
     ({State.MANUAL}, State.STABILIZING,
      lambda c: "re-arm" if c.rearm and not c.i.remote.deflected else None, lambda f: ("freeze", "stand")),
-    ({State.STABILIZING, State.READY, State.HOLD}, State.STABILIZING,
+    ({State.STABILIZING, State.HOLD}, State.STABILIZING,
      lambda c: "reset" if c.reset else None, lambda f: ("reset",)),
     ({State.RUNNING}, State.STABILIZING, lambda c: "reset" if c.reset else None, lambda f: ("freeze", "reset")),
 )
@@ -166,16 +168,16 @@ class Supervisor:
                     break
 
         log: tuple[str, ...] = ()
+        if c.start and "start_session" not in entry and now - self._ignored_logged >= 1.0:
+            self._ignored_logged = now
+            log = (f"[supervisor] start ignored in {prev.value}",)
         if target is None:
             actions = ("manual_walk",) if prev is State.MANUAL else ()
-            if c.start and prev is not State.READY and now - self._ignored_logged >= 1.0:
-                self._ignored_logged = now
-                log = (f"[supervisor] start ignored in {prev.value}",)
             reason = self.last_reason
         else:
             actions = entry
             line = f"[supervisor] {prev.value} -> {target.value}: {reason}"
-            log = (line, "HTDPOLICY READY TO DEPLOY") if target is State.READY else (line,)
+            log += (line, "HTDPOLICY READY TO DEPLOY") if target is State.READY else (line,)
             self.last_reason = reason
             if target is not prev:
                 self.state, self.since = target, now

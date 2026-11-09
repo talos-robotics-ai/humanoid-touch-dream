@@ -217,3 +217,20 @@ def test_a_silent_walker_is_a_link_fault_not_an_estop():
     sup = Supervisor(G1_SPEC.supervisor, 0.0); to_ready(sup)
     sup.step(inputs(ui=("start",)), 1.0)
     assert sup.step(inputs(fault="lower_jetson_silent_1.2s"), 2.0).state is State.HOLD
+
+def test_ready_reset_wins_over_a_lost_condition_in_the_same_tick():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_ready(sup)
+    d = sup.step(inputs(policy_ready=False, remote=remote(reset=True)), 1.0)
+    assert d.state is State.STABILIZING and d.actions == ("reset",) and d.reason == "reset"
+
+def test_start_ignored_is_logged_even_when_another_transition_fires():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0)
+    d = sup.step(inputs(ui=("start",)), 0.0)                          # BOOT -> STABILIZING
+    assert d.log == ("[supervisor] start ignored in BOOT", "[supervisor] BOOT -> STABILIZING: walker live")
+    d = sup.step(inputs(ui=("start",)), 0.5)                          # STABILIZING -> READY, rate-limited
+    assert d.log[0].startswith("[supervisor] STABILIZING -> READY") and d.log[-1] == "HTDPOLICY READY TO DEPLOY"
+    d = sup.step(inputs(remote=remote(start=True, reset=True)), 1.5)  # READY: reset wins over start
+    assert d.actions == ("reset",) and d.log[0] == "[supervisor] start ignored in READY"
+    d = sup.step(inputs(), 1.6)
+    d = sup.step(inputs(ui=("start",)), 1.7)
+    assert d.state is State.RUNNING and not any("ignored" in line for line in d.log)

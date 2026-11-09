@@ -11,6 +11,7 @@ TOPIC_CAMERA = "rt/htd/camera"
 TOPIC_UI_COMMAND = "rt/htd/ui_command"
 
 UI_COMMANDS = ("start", "stop", "rearm", "reset")
+RECENT_LOG_LINES = 12
 
 
 @dataclass
@@ -38,6 +39,7 @@ class SupervisorStatus(IdlStruct):
     tick_p50_ms: float
     tick_max_ms: float
     log_line: str
+    recent_log: sequence[str]       # the last RECENT_LOG_LINES supervisor log lines, oldest first
 
 
 @dataclass

@@ -1,5 +1,4 @@
 import argparse
-import copy
 import json
 import os
 import time
@@ -17,7 +16,6 @@ import torch
 policy_source_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'htd_policy')
 sys.path.insert(0, policy_source_dir)
 from policy import make_policy
-from pynput import keyboard
 # DDS imports for synchronized teleoperation publishing
 from cyclonedds.domain import DomainParticipant
 from cyclonedds.topic import Topic
@@ -45,7 +43,7 @@ from deploy import dds as deploy_dds
 from deploy.msgs import (TOPIC_CAMERA, TOPIC_POLICY_STATUS, TOPIC_PREDICTED_CHUNK, TOPIC_SUPERVISOR,
                          CameraFrame, PolicyStatus, PredictedChunk, SupervisorStatus)
 from deploy.telemetry import (MISSING_AGE_S, LoopTimer, camera_message, chunk_message, entered_running, is_ready,
-                              policy_status_message)
+                              observations_present, policy_status_message)
 
 # Tactile key -> (hand, start, end) for slicing full 1062-dim tactile
 _TACTILE_KEY_SLICE = {
@@ -1453,6 +1451,7 @@ class HTDPolicyRollout:
             pass  #
 
     def keyboard_listener_thread(self):
+        from pynput import keyboard   # lazy: needs an X display, unused under --supervisor
         with keyboard.Listener(on_press=self.on_press_key) as listener:
             listener.join()
 
@@ -1468,16 +1467,18 @@ class HTDPolicyRollout:
             threading.Thread(target=self.wrist_left_camera_stream_thread, daemon=True).start()
             threading.Thread(target=self.wrist_right_camera_stream_thread, daemon=True).start()
 
-        keyboard_listener_thread = threading.Thread(target=self.keyboard_listener_thread, daemon=True)
-        keyboard_listener_thread.start()
+        if self.supervisor:
+            print("supervisor mode: keyboard keys 1/2/3 disabled; use the remote, the UI or deploy/ui/cmd.py")
+        else:
+            threading.Thread(target=self.keyboard_listener_thread, daemon=True).start()
         if self.args.async_inference:
             threading.Thread(target=self.inference_worker_thread, daemon=True).start()
         if self.supervisor:
-            self.on_rollout = True   # start without key presses; keys 1/2/3 keep working
+            # on_rollout is set by the observation gate in the control loop
             for target in (self._telemetry_status_thread, self._telemetry_camera_thread,
                            self._supervisor_listener_thread):
                 threading.Thread(target=target, daemon=True).start()
-            print("Supervisor mode: inference started, publishing status, predicted chunks and camera")
+            print("Supervisor mode: publishing status and camera; inference waits for observations")
 
         # Main control loop
         loop_period = 1.0 / self.args.control_freq
@@ -1489,6 +1490,9 @@ class HTDPolicyRollout:
         try:
             while self.running:
                 loop_start = time.perf_counter()
+                if self.supervisor and not self.on_rollout and observations_present(self._input_ages()):
+                    self.on_rollout = True   # robot state, hand state and a real head frame have all arrived
+                    print("observations present: inference and publishing start")
                 if self._restart_chunk.is_set():
                     self._restart_chunk.clear()
                     self.scheduler.reset()

@@ -43,7 +43,9 @@ def test_status_message_carries_state_flags_remote_and_timing():
     snap = RemoteSnapshot(0.0, 0.5, -0.4, 0.0, frozenset({1, 2}), False)
     d = sup.step(Inputs(True, None, standing, False, True, events, (), (), False), 10.5)
     m = status_message(sup, d, standing, events, snap, False, True, True, None, True, False,
-                       (2.5, 7.0), "[supervisor] BOOT -> STABILIZING: walker live", 1000.0, now_mono=11.0)
+                       (2.5, 7.0), "[supervisor] BOOT -> STABILIZING: walker live",
+                       ("[supervisor] start ignored in BOOT", "[supervisor] BOOT -> STABILIZING: walker live"),
+                       1000.0, now_mono=11.0)
     assert isinstance(m, SupervisorStatus)
     assert (m.state, m.since_s, m.reason, m.timestamp) == (State.STABILIZING.value, 0.5, "walker live", 1000.0)
     assert (m.walker_live, m.standing, m.standing_for_s, m.policy_ready, m.frames_fresh) == (True, False, 1.3, False, True)
@@ -52,6 +54,8 @@ def test_status_message_carries_state_flags_remote_and_timing():
     assert (m.stick_lx, m.stick_ly, m.stick_rx, m.stick_ry) == (0.0, 0.5, -0.4, 0.0)
     assert list(m.buttons) == ["L1", "start"] and (m.manual_vx, m.manual_wz) == (0.12, -0.2)
     assert (m.tick_p50_ms, m.tick_max_ms) == (2.5, 7.0) and m.log_line.startswith("[supervisor] BOOT")
+    assert list(m.recent_log) == ["[supervisor] start ignored in BOOT", "[supervisor] BOOT -> STABILIZING: walker live"]
+    assert SupervisorStatus.deserialize(m.serialize()) == m
 
 def test_ui_command_nonces_expire_with_their_commands():
     f = UiCommandFilter(max_age_s=0.5)
@@ -60,3 +64,8 @@ def test_ui_command_nonces_expire_with_their_commands():
     assert len(f._seen) <= 1                                  # only nonces still young enough to replay
     assert f.accept(UiCommand(timestamp=199.0, nonce=99, command="stop", source="ui"), 199.3) is None   # still remembered
     assert f.accept(UiCommand(timestamp=199.0, nonce=99, command="stop", source="ui"), 199.6) is None   # expired, and too old
+
+def test_ui_commands_stamped_in_the_future_are_rejected():
+    f = UiCommandFilter(max_age_s=0.5)
+    assert f.accept(UiCommand(timestamp=100.2, nonce=1, command="start", source="ui"), 100.0) is None
+    assert f.accept(UiCommand(timestamp=100.0, nonce=2, command="start", source="ui"), 100.0) == "start"   # age 0
