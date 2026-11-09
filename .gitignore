@@ -38,6 +38,7 @@ demonstrations/
 # Training logs and generated run directories
 *.log
 logs/
+deploy/tests/logs/
 wandb/
 runs/
 ckpt/
