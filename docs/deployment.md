@@ -17,7 +17,7 @@ nothing of this; the laptop talks to the robot over the cable.
 | Process | Command | Role |
 | --- | --- | --- |
 | walker | `g1_walk/run_walker.sh` | the teleop's walking policy; the only process that writes `rt/lowcmd` to the motors |
-| controller | `g1_walk/controller.py` | arm IK (inverse kinematics), walk, torso and hand commands to the walker; the supervisor state machine; reads the remote |
+| controller | `g1_walk/controller.py` | arm IK (inverse kinematics, solved in a child process), walk, torso and hand commands to the walker; the supervisor state machine; reads the remote |
 | rollout | `policy_rollout/policy_rollout.py` | HTD inference at 30 Hz; publishes the policy's frames, its status, the predicted chunk and the camera image |
 | UI | `deploy/ui/server.py` | subscribes to all of the above and serves the monitoring page; can be stopped at any time without effect on the robot |
 
@@ -357,8 +357,8 @@ Sections, top to bottom:
    Re-arm, Reset, and `walk` and `manual walk`: read-only indicators of the
    controller's `--walk` and `--manual_walk` flags.
 2. **Robot.** Torso height, roll and pitch; the walk command applied; the manual walk
-   command from the sticks; the controller's tick time and rollout's loop time (median
-   and maximum over the last second); inference time, chunk count and overruns; the two
+   command from the sticks; the controller's tick time, its arm IK solve time and
+   rollout's loop time (median and maximum over the last second); inference time, chunk count and overruns; the two
    sticks and the pressed buttons; the age of every input.
 3. **Camera.** The policy's head image, at most 5 frames per second, with its age.
 4. **What happens next.** Six plots on one time axis, -6 s to +2 s. Left of 0, the
@@ -450,7 +450,16 @@ MuJoCo on the operator laptop (RTX 5070 Laptop GPU), `sim_supervisor.sh`, run
 | controller tick, RUNNING, median | 25.46 | 25.94 | within 2 ms of each other |
 | rollout loop, RUNNING, max | 4.1 | 3.7 | |
 
-The RUNNING tick carries the arm IK solve, about 25 ms, as before the supervisor.
+The RUNNING rows above predate the IK worker: the tick then carried the arm IK solve,
+about 25 ms, as before the supervisor. The solve now runs in a child process of the
+controller (`g1_walk/ik_worker.py`, OpenMP on one thread): the tick hands it the newest
+policy frame and sends the latest solution, and never waits for a solve. A session's
+first tick sends no arm command (no solution yet); a worker that owes a solution for
+longer than `--policy_timeout` logs `IK worker stalled: arms hold` and the arms keep
+their last command while walk and torso continue. Offline, without the sim
+(`g1_walk/tests/bench_ik.py --tick`, 50 Hz, a frame every 1/30 s): tick median 0.10 ms
+and max 0.37 ms against 12.5 and 18.9 ms with the solve inline; solve 2.8 ms. The
+Robot panel's `arm IK solve` row shows the live solve time.
 
 | Transition | Time |
 | --- | --- |
@@ -465,8 +474,8 @@ The RUNNING tick carries the arm IK solve, about 25 ms, as before the supervisor
 No robot or camera is needed:
 
 ```bash
-PYTHONPATH= $PY -m pytest deploy/tests -q                                  # 97 tests: supervisor, standing, remote, plots, UI server
-PYTHONPATH= $PY -m unittest discover -s g1_walk/tests -p 'test_*.py'       # g1_walk command shaping, walk gate, hands
+PYTHONPATH= $PY -m pytest deploy/tests -q                                  # 101 tests: supervisor, standing, remote, plots, UI server
+PYTHONPATH= $PY -m unittest discover -s g1_walk/tests -p 'test_*.py'       # g1_walk command shaping, walk gate, hands, IK worker
 bash deploy/tests/sim_supervisor.sh --model_path RUN_DIR --python $PY      # the whole stack in MuJoCo, about 2 min
 ```
 

@@ -40,6 +40,8 @@ class SupervisorStatus(IdlStruct):
     tick_max_ms: float
     log_line: str
     recent_log: sequence[str]       # the last RECENT_LOG_LINES supervisor log lines, oldest first
+    ik_p50_ms: float = 0.0          # the controller's arm-IK solve times (its worker process)
+    ik_max_ms: float = 0.0
 
 
 @dataclass

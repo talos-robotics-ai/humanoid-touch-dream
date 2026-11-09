@@ -75,9 +75,11 @@ def status_message(sup: Supervisor, decision: Decision, standing: StandingReport
                    events: RemoteEvents, snap: RemoteSnapshot, policy_ready: bool,
                    frame_fresh: bool, walker_live: bool, fault: str | None, walk_enabled: bool,
                    manual_walk_enabled: bool, tick_stats: tuple[float, float], last_log: str,
-                   recent_log, now_wall: float, now_mono: float | None = None) -> SupervisorStatus:
+                   recent_log, now_wall: float, now_mono: float | None = None,
+                   ik_stats: tuple[float, float] = (0.0, 0.0)) -> SupervisorStatus:
     """`recent_log`: the supervisor's last log lines, oldest first.
-    `now_mono` is the supervisor's clock (time.monotonic) for the time in state."""
+    `now_mono` is the supervisor's clock (time.monotonic) for the time in state.
+    `ik_stats`: the IK worker's solve (p50, max) ms."""
     if now_mono is None:
         now_mono = time.monotonic()
     p50, mx = tick_stats
@@ -102,4 +104,5 @@ def status_message(sup: Supervisor, decision: Decision, standing: StandingReport
         tick_p50_ms=float(p50), tick_max_ms=float(mx),
         log_line=last_log,
         recent_log=list(recent_log),
+        ik_p50_ms=float(ik_stats[0]), ik_max_ms=float(ik_stats[1]),
     )

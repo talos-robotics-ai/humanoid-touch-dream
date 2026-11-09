@@ -28,7 +28,8 @@ Lifecycle, the teleop backend's under ``--lower jetson``:
 2. a session starts on the first fresh policy frame once the arms are home:
    the walker is engaged, the link watchdog armed, the arms eased onto the
    IK solution and the torso onto its command;
-3. per tick: IK, engage glide, speed cap, jump guard, arms to the walker;
+3. per tick: the latest IK solution (solved in a child process, ik_worker.py),
+   engage glide, speed cap, jump guard, arms to the walker;
    walk command through the walk gate; torso command; hands retargeted;
 4. a session ends -- arms held, walk to zero, the walker stands -- when the
    policy falls silent for ``--policy_timeout`` s, on ``s`` (stop) at the
@@ -68,6 +69,7 @@ sys.path.append(os.path.dirname(HERE))
 import paths  # noqa: E402
 from commands import (TORSO_ATTITUDE_MODES, WalkGate, parse_teleop_data,  # noqa: E402
                       torso_command, walk_command)
+from ik_worker import IkProcess, IkWorker, build_arm_ik  # noqa: E402
 from shaping import ArmShaper, Glide, TorsoEngage  # noqa: E402
 from deploy import dds, remote  # noqa: E402
 from deploy.controller_bridge import (TickTimer, UiCommandFilter, standing_sample,  # noqa: E402
@@ -84,6 +86,7 @@ TOPIC_STATE = "rt/robot/state"
 TOPIC_EEF = "rt/robot/eef_state"
 TOPIC_TOUCH = ("rt/inspire_hand/touch/l", "rt/inspire_hand/touch/r")
 SUPERVISOR_KEYS = {"s": "stop", "g": "rearm", "r": "reset"}
+IK_READY_TIMEOUT_S = 60.0
 
 
 def parse_args(argv=None):
@@ -182,12 +185,12 @@ class Controller:
         self.operator_hold = False      # 's' at the keyboard
         self.resetting = False
         self._fresh_after = 0.0         # frames received before this are stale
-        # The latest policy frame, under its own lock: the control tick holds
-        # self._lock through an IK solve, which must not stall the reader.
+        # The latest policy frame, under its own lock: the reader never waits on a tick.
         self._frame_lock = threading.Lock()
         self._frame = None
         self._frame_t = None
-        self._solved = None             # (frame, IK solution) of the last solve
+        self._ik_frame = None           # the frame last submitted to the IK worker
+        self._ik_stalled = False
         self._reset_pending = threading.Event()
         self._open_hands = threading.Event()
         self._home_glide = None
@@ -199,7 +202,11 @@ class Controller:
         # Everything slow to build comes before the walker link: once linked,
         # this process must answer the walker every 0.25 s or it stands itself.
         urdf_dir = "./assets/g1/"
-        self.ik = G1_29_ArmIK(urdf_path=urdf_dir + G1_URDFS[args.g1_type], urdf_dir=urdf_dir)
+        urdf_path = urdf_dir + G1_URDFS[args.g1_type]
+        # The solver's own process builds its IK while this one builds the rest.
+        self._ik_proc = IkProcess(build_arm_ik, urdf_path, urdf_dir)
+        # Here only for its reduced model (gravity); every solve runs in the child.
+        self.ik = G1_29_ArmIK(urdf_path=urdf_path, urdf_dir=urdf_dir)
         model = self.ik.reduced_robot.model
         data = model.createData()
         zeros = np.zeros(model.nv)
@@ -221,6 +228,12 @@ class Controller:
         if args.hands == "modbus":
             from hands import InspireHands
             self.hands = InspireHands()
+        try:
+            self._ik_proc.wait_ready(IK_READY_TIMEOUT_S)
+        except Exception:
+            self._ik_proc.close()
+            raise
+        self.ik_worker = IkWorker(self._ik_proc.solve, self._arm_measure, logger)
 
         self.walker = WalkerLink(args.walker_host, args.walker_port, self.estop)
         self.body = self.walker.body
@@ -264,6 +277,10 @@ class Controller:
         self._sup_view = None           # the last tick's decision and inputs, for the status
         self._awaiting_fresh = False    # RUNNING until a frame newer than the start arrives
         self._manual_engaged = False
+
+    def _arm_measure(self):
+        """The IK worker's warm start, read on its thread."""
+        return self.body.get_current_dual_arm_q(), self.body.get_current_dual_arm_dq()
 
     # -- latches ---------------------------------------------------------------
     def estop(self, reason="operator"):
@@ -412,17 +429,25 @@ class Controller:
             self._start_session(now)
 
     def _session_tick(self, frame, now):
-        # One IK solve per policy frame (policy_rollout publishes at 30 Hz, a
-        # solve takes about 20 ms); every tick shapes and sends the latest.
-        if self._solved is None or self._solved[0] is not frame:
-            q_meas = self.body.get_current_dual_arm_q()
-            dq_meas = self.body.get_current_dual_arm_dq()
-            q_sol, _ = self.ik.solve_ik(frame.left_pose, frame.right_pose, q_meas, dq_meas)
-            self._solved = (frame, q_sol)
-        out = self.arms.shape(self._solved[1], now)
-        if out is not None:
-            self.walker.send_arms(*out)
-            self._last_arm_cmd = out[0]
+        # One IK solve per policy frame, on the worker (never waited for here);
+        # every tick shapes and sends the latest solution. No solution yet (a
+        # session's first tick) or a stalled worker: no arm command, the last one stands.
+        if frame is not self._ik_frame:
+            self._ik_frame = frame
+            self.ik_worker.submit(frame)
+        stalled = self.ik_worker.owed_for(now) > self.args.policy_timeout
+        if stalled != self._ik_stalled:
+            self._ik_stalled = stalled
+            if stalled:
+                self.log.warning("[g1_walk] IK worker stalled: arms hold")
+            else:
+                self.log.info("[g1_walk] IK worker answering again: arms follow the policy")
+        sol = None if stalled else self.ik_worker.latest()
+        if sol is not None:
+            out = self.arms.shape(sol[1], now)
+            if out is not None:
+                self.walker.send_arms(*out)
+                self._last_arm_cmd = out[0]
         s = self.walker.strategy
         if frame.velocity is not None and abs(frame.velocity[1]) > 0.05:
             self._say_once("vy", "[g1_walk] the policy asks for vy %.2f m/s; the walker has "
@@ -458,6 +483,9 @@ class Controller:
         q_from = self._last_arm_cmd if self._last_arm_cmd is not None \
             else self.body.get_current_dual_arm_q()
         self.arms.begin(q_from)
+        self.ik_worker.clear()          # no solution from before this session
+        self._ik_frame = None
+        self._ik_stalled = False
         self.torso.begin(self.walker.applied_torso(), now)
         self.gate.rearm()
         self._open_hands.clear()
@@ -646,7 +674,8 @@ class Controller:
         self.writer_sup.write(status_message(
             self.sup, d, standing, events, snap, ready, fresh, live, fault,
             self.args.walk == "on", self.args.manual_walk == "on",
-            self.ticks.stats(time.monotonic()), self._last_log, recent_log, time.time()))
+            self.ticks.stats(time.monotonic()), self._last_log, recent_log, time.time(),
+            ik_stats=self.ik_worker.stats(time.monotonic())))
 
     # -- between sessions: the arms' glide home ----------------------------------------
     def _start_home_glide(self, launch=False):
@@ -763,6 +792,7 @@ class Controller:
             loops.append(self._keyboard_loop)
         with self._lock:
             self._start_home_glide(launch=True)
+        self.ik_worker.start()
         for fn in loops:
             threading.Thread(target=fn, name=fn.__name__.strip("_"), daemon=True).start()
         if not self.walker.handover():
@@ -796,6 +826,8 @@ class Controller:
         # One link heartbeat carries the stand before the link closes.
         time.sleep(0.1)
         self.walker.detach()
+        self.ik_worker.stop()
+        self._ik_proc.close()
 
 
 def configure_logging(log_file=None):

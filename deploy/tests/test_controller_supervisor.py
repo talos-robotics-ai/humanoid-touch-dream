@@ -74,6 +74,19 @@ class Walker:
     def applied_torso(self): return (0.0, 0.0, 0.0, 0.0)
 
 
+class IkWorker:
+    """controller.IkWorker's interface; a solution once a frame was submitted unless `solution` is False."""
+
+    def __init__(self):
+        self.submitted, self.solution, self.owed, self.cleared = [], True, 0.0, 0
+
+    def submit(self, frame): self.submitted.append(frame)
+    def latest(self): return (self.submitted[-1], np.zeros(14), 0.0) if self.solution and self.submitted else None
+    def owed_for(self, now): return self.owed
+    def clear(self): self.cleared += 1
+    def stats(self, now): return (1.5, 3.0)
+
+
 FRAME = PolicyFrame(np.eye(4), np.eye(4), np.zeros(75), np.zeros(75), np.zeros(3), 0.78,
                     np.zeros(3), 0.0)
 
@@ -95,14 +108,17 @@ class Rig:
         c.quit = threading.Event()
         c.session = c.operator_hold = c.resetting = False
         c.ready = True
-        c._fresh_after, c._frame, c._frame_t, c._solved = 0.0, None, None, None
+        c._fresh_after, c._frame, c._frame_t = 0.0, None, None
+        c._ik_frame, c._ik_stalled = None, False
         c._reset_pending, c._open_hands = threading.Event(), threading.Event()
         c._home_glide, c._arms_home, c._last_arm_cmd = None, True, np.full(14, 0.1)
         c._said, c._stop_request = set(), None
         c.gravity = lambda q: np.zeros(14)
-        c.arms = types.SimpleNamespace(begin=lambda q: None, shape=lambda q, now: (np.zeros(14), np.zeros(14)))
+        self.shapes = []                # the solutions the arm shaper was given
+        c.arms = types.SimpleNamespace(begin=lambda q: None,
+                                       shape=lambda q, now: self.shapes.append(q) or (np.zeros(14), np.zeros(14)))
         c.torso = types.SimpleNamespace(begin=lambda a, now: None, shape=lambda target, now: (0.0, 0.0, 0.0, 0.0))
-        c.ik = types.SimpleNamespace(solve_ik=lambda *a: (np.zeros(14), None))
+        c.ik_worker = IkWorker()
         c.gate = WalkGate()
         c.walker = Walker(self.calls)
         c.body = c.walker.body
@@ -323,3 +339,55 @@ def test_no_motor_state_yet_fails_the_standing_check_safe(rig):
     rig.c.body.get_current_motor_dq = no_lowstate
     rig.tick(120)
     assert rig.state is State.STABILIZING
+
+
+def test_running_without_an_ik_solution_sends_no_arms(rig):
+    rig.c.ik_worker.solution = False
+    rig.to_running()
+    rig.shapes.clear()
+    calls = rig.tick()
+    assert rig.state is State.RUNNING and rig.c.session
+    assert ("arms",) not in calls and rig.shapes == []
+    assert ("torso",) in calls and any(c[0] == "walk" for c in calls)
+    assert rig.c.ik_worker.submitted == [FRAME] and rig.c.ik_worker.cleared == 1
+
+
+def test_running_with_an_ik_solution_shapes_and_sends_it(rig):
+    rig.to_running()
+    rig.shapes.clear()
+    calls = rig.tick(3)
+    assert ("arms",) in calls and len(rig.shapes) == 3
+    assert rig.c.ik_worker.submitted == [FRAME]         # one submit per frame, not per tick
+    assert rig.status[-1].ik_p50_ms == 1.5 and rig.status[-1].ik_max_ms == 3.0
+
+
+def test_a_stalled_ik_worker_holds_the_arms_and_logs_once(rig):
+    warnings = []
+    rig.c.log.warning = warnings.append
+    rig.to_running()
+    rig.c.ik_worker.owed = 0.6                          # past --policy_timeout
+    rig.shapes.clear()
+    for _ in range(3):
+        calls = rig.tick()
+        assert ("arms",) not in calls and ("torso",) in calls
+    assert rig.shapes == [] and rig.state is State.RUNNING
+    assert [w for w in warnings if "IK worker" in w] == ["[g1_walk] IK worker stalled: arms hold"]
+    rig.c.ik_worker.owed = 0.0
+    assert ("arms",) in rig.tick()
+
+
+def test_supervisor_off_sessions_take_the_worker_solution(monkeypatch):
+    rig = Rig(monkeypatch, "--supervisor", "off")
+    rig.c.sup = None
+    rig.c.ik_worker.solution = False
+    calls = rig.tick()
+    assert rig.c.session and ("engage",) in calls       # a session starts on the first fresh frame
+    calls = rig.tick()
+    assert ("arms",) not in calls and ("torso",) in calls
+    rig.c.ik_worker.solution = True
+    calls = rig.tick()
+    assert ("arms",) in calls and len(rig.shapes) == 1
+    rig.tick(24, frames=False)                          # silent for 0.48 s: still a session
+    assert rig.c.session
+    calls = rig.tick(frames=False)
+    assert not rig.c.session and ("stand",) in calls    # the policy timeout ends it, as before

@@ -44,6 +44,9 @@ it (`third_party/g1_walk`, the `talos-robotics-ai/g1_walk_cbf` checkpoint repo).
    MuJoCo sim host (--iface lo)   or   the G1 (--iface <robot NIC>)
 ```
 
+The arm IK solves in a child process of the controller (`ik_worker.py`): the 50 Hz
+tick hands it the newest policy frame and sends the latest solution, never waiting.
+
 | Process | Publishes | Started by |
 |---|---|---|
 | walker (2 processes) | `rt/lowcmd` | `bash g1_walk/run_walker.sh` |
@@ -139,8 +142,9 @@ robot's PC2 runs nothing of this module.
   frame once the arms are home engages the walker, arms the link watchdog, and eases
   the arms (teleop engage glide, `PSI_ENGAGE_S` / `PSI_ENGAGE_VEL`) and the torso onto
   the policy's commands.
-* **Per tick** (50 Hz): HTD's `G1_29_ArmIK` once per policy frame, then the engage
-  glide, a 4 rad/s joint speed cap (`--arm_max_vel`), the teleop's jump guard, and the
+* **Per tick** (50 Hz): HTD's `G1_29_ArmIK` once per policy frame, solved in the
+  controller's IK process (`ik_worker.py`; a tick never waits for it, and sends no arm
+  command until a session's first solution arrives), then the engage glide, a 4 rad/s joint speed cap (`--arm_max_vel`), the teleop's jump guard, and the
   command with its gravity torque goes to the walker through `G1_29_JetsonBody` (as
   `_safely_set_arms`) and to the walker's arm reference. Walk: `(vx, wz)` from
   `velocity_commands`, clipped to the walker's box; vy is dropped (the walker has no
@@ -238,9 +242,10 @@ python g1_walk/check_pin.py && bash g1_walk/tests/sim_e2e.sh --python $PY
   wrist targets were computed from by the IK's own error (0.14 rad p95 on the test's
   trajectory, offline). The teleop's 8 Hz reference shaper and per-joint speed fraction
   are replaced by the engage glide and a uniform 4 rad/s cap.
-* `rt/robot/state`, `eef_state` and the touch topics arrive at about 34 Hz in the sim
-  test (50 Hz asked): each IK solve holds the Python interpreter for about 20 ms, as in
-  HTD's own controller. policy_rollout steps at 30 Hz.
+* With the IK solved inline (before `ik_worker.py`), `rt/robot/state`, `eef_state` and
+  the touch topics arrived at about 34 Hz in the sim test (50 Hz asked): each solve held
+  the Python interpreter for about 20 ms, as in HTD's own controller. The solve now runs
+  in its own process. policy_rollout steps at 30 Hz.
 * The walk command goes to the walker as the policy gives it (clipped); the teleop
   passed stick commands through its walk arbiter's ramp first. The walker slews both
   the same way (0.5 m/s², 1.0 rad/s²).

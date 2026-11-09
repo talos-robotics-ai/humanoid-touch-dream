@@ -96,7 +96,7 @@ class DemoTelemetry:
             stick_lx=0.3 * math.sin(t), stick_ly=0.3 * math.cos(t), stick_rx=0.0, stick_ry=0.0,
             buttons=["L1"] if int(t) % 5 == 0 else [], manual_vx=0.0, manual_wz=0.0,
             tick_p50_ms=0.8, tick_max_ms=2.1, log_line=self._log,
-            recent_log=list(self._recent))
+            recent_log=list(self._recent), ik_p50_ms=2.8, ik_max_ms=3.4)
         policy = dict(timestamp=time.time(), ready=supervisor["policy_ready"], publishing=state == "RUNNING",
                       inference_ms=42.0, chunks=int(t / 1.5), overrun_steps=0, robot_state_age_s=0.02,
                       eef_state_age_s=0.02, camera_age_s=0.1, loop_p50_ms=1.2, loop_max_ms=4.0,

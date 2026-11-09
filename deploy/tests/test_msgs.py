@@ -25,8 +25,10 @@ def test_status_messages_round_trip_through_cdr():
         fault="", gating=["press Start"], stick_lx=0.0, stick_ly=0.5, stick_rx=-0.25, stick_ry=0.0,
         buttons=["L1", "start"], manual_vx=0.1, manual_wz=-0.2, tick_p50_ms=0.25, tick_max_ms=1.5,
         log_line="HTDPOLICY READY TO DEPLOY",
-        recent_log=["[supervisor] BOOT -> STABILIZING: walker live", "HTDPOLICY READY TO DEPLOY"])
+        recent_log=["[supervisor] BOOT -> STABILIZING: walker live", "HTDPOLICY READY TO DEPLOY"],
+        ik_p50_ms=2.75, ik_max_ms=3.5)
     assert msgs.SupervisorStatus.deserialize(sup.serialize()) == sup
+    assert msgs.SupervisorStatus.deserialize(sup.serialize()).ik_max_ms == 3.5
     pol = msgs.PolicyStatus(timestamp=2.0, ready=False, publishing=True, inference_ms=9.75, chunks=12,
                             overrun_steps=3, robot_state_age_s=0.02, eef_state_age_s=0.03, camera_age_s=1e9,
                             loop_p50_ms=1.25, loop_max_ms=4.0, interval=45, horizon=60,

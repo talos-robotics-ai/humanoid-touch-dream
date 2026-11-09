@@ -227,6 +227,7 @@
       ["walk applied", "vx " + fmt(m.vx, 2) + " m/s, wz " + fmt(m.wz, 2) + " rad/s"],
       ["manual walk", "vx " + fmt(sup.manual_vx, 2) + ", wz " + fmt(sup.manual_wz, 2)],
       ["controller tick", "p50 " + fmt(sup.tick_p50_ms, 2) + " / max " + fmt(sup.tick_max_ms, 2) + " ms"],
+      ["arm IK solve", "p50 " + fmt(sup.ik_p50_ms, 2) + " / max " + fmt(sup.ik_max_ms, 2) + " ms"],
       ["rollout loop", "p50 " + fmt(pol.loop_p50_ms, 2) + " / max " + fmt(pol.loop_max_ms, 2) + " ms"],
       ["inference", fmt(pol.inference_ms, 1) + " ms, chunks " + (pol.chunks === undefined ? "—" : pol.chunks) +
         ", overrun " + (pol.overrun_steps === undefined ? "—" : pol.overrun_steps)],
