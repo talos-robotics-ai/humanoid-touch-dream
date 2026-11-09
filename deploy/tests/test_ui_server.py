@@ -72,7 +72,7 @@ def test_a_malformed_sample_does_not_stop_the_poll_thread():
     ok = types.SimpleNamespace(timestamp=2.0, state="READY")
     t._readers = {"camera": _Reader([_Malformed()]), "supervisor": _Reader([ok])}
     t._lock, t._latest, t._jpeg, t._camera_seq, t._errors = threading.Lock(), {}, None, 0, set()
-    t._last_poll = None
+    t._last_poll, t._stop = None, threading.Event()
     t._thread = threading.Thread(target=t._poll, daemon=True)
     assert t.snapshot()["dds_alive"] is False                           # thread not started
     t.start()
@@ -80,6 +80,22 @@ def test_a_malformed_sample_does_not_stop_the_poll_thread():
     snap = t.snapshot()
     assert t._thread.is_alive() and snap["dds_alive"] is True and snap["supervisor"].state == "READY"
     assert "camera" in t._errors
+
+
+def test_stop_ends_the_poll_thread():
+    import threading, time
+    from deploy.ui.server import Telemetry
+    t = Telemetry.__new__(Telemetry)
+    t._readers = {"supervisor": _Reader([])}
+    t._lock, t._latest, t._jpeg, t._camera_seq, t._errors = threading.Lock(), {}, None, 0, set()
+    t._last_poll, t._stop = None, threading.Event()
+    t._thread = threading.Thread(target=t._poll, daemon=True)
+    t.start()
+    time.sleep(0.05)
+    assert t._thread.is_alive()
+    t0 = time.monotonic()
+    t.stop(timeout=1.0)
+    assert not t._thread.is_alive() and time.monotonic() - t0 < 0.5
 
 
 def test_nonces_start_at_a_random_offset_per_process(monkeypatch):

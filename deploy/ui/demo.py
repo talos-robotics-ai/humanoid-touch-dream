@@ -78,6 +78,9 @@ class DemoTelemetry:
         cv2.putText(img, state, (6, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
         return cv2.imencode(".jpg", img)[1].tobytes()
 
+    def stop(self):
+        pass
+
     def snapshot(self) -> dict:
         now = time.monotonic()
         t = now - self._t0

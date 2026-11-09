@@ -91,14 +91,22 @@ class Telemetry:
         self._camera_seq = 0
         self._errors = set()
         self._last_poll = None      # monotonic end of the last sweep over the readers
+        self._stop = threading.Event()
         self._thread = threading.Thread(target=self._poll, name="ui-dds", daemon=True)
 
     def start(self):
         self._thread.start()
         return self
 
+    def stop(self, timeout=2.0):
+        """Ends the poll thread before the interpreter tears the DDS participant down: a
+        take() racing that teardown at exit has hung the process past SIGTERM."""
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout)
+
     def _poll(self):
-        while True:
+        while not self._stop.is_set():
             for name, rd in self._readers.items():
                 try:   # the whole iteration: a malformed sample must not end the thread
                     samples = [s for s in rd.take(N=4) if s is not None and hasattr(s, "timestamp")]
@@ -113,7 +121,7 @@ class Telemetry:
                 except Exception as e:
                     self._error(name, e)
             self._last_poll = time.monotonic()
-            time.sleep(POLL_S)
+            self._stop.wait(POLL_S)
 
     def _error(self, where, e):
         if where not in self._errors:
@@ -272,7 +280,11 @@ def main(argv=None):
         dds.configure_interface(args.iface)
         telemetry = Telemetry().start()
     print(f"HTD UI on http://{args.host}:{args.port}" + (" (demo)" if args.demo else ""), flush=True)
-    web.run_app(make_app(telemetry, rate_hz=args.rate), host=args.host, port=args.port, print=None)
+    try:
+        web.run_app(make_app(telemetry, rate_hz=args.rate), host=args.host, port=args.port, print=None,
+                    shutdown_timeout=2.0)
+    finally:
+        telemetry.stop()
 
 
 if __name__ == "__main__":
