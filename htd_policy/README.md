@@ -3,6 +3,9 @@
 Train HTD, MXT, and ACT policies from your processed G1 demonstrations.
 HTD enables tactile and force dreaming with `train_mxt.py --touch_dreaming`.
 
+For our dataset, its launcher and the training settings we use, see
+[docs/training.md](../docs/training.md); the model is described in [docs/model.md](../docs/model.md).
+
 ## Installation
 
 From the repository root:
@@ -68,12 +71,16 @@ To select a profile, add `--embodiment_config_path` and
 | DFTP non-walk, 16-dim (default) | `configs/htd/dftp_nonwalk_latent16.yaml` | `configs/htd/trunk_nonwalk.yaml` |
 | DFTP non-walk, 64-dim | `configs/htd/dftp_nonwalk_latent64.yaml` | `configs/htd/trunk_nonwalk.yaml` |
 | DFTP walk, 16-dim | `configs/htd/dftp_walk_latent16.yaml` | `configs/htd/trunk_walk.yaml` |
+| DFTP walk, 16-dim, tactile x100 | `configs/htd/dftp_walk_latent16_tscale.yaml` | `configs/htd/trunk_walk.yaml` |
 | DFTP walk, 64-dim | `configs/htd/dftp_walk_latent64.yaml` | `configs/htd/trunk_walk.yaml` |
 | F1, head + wrists | `configs/htd/f1.yaml` | `configs/htd/trunk_f1.yaml` |
 
 DFTP non-walk profiles use head and wrist cameras. Walk profiles use only the
 head camera and give more weight to velocity prediction. Each DFTP tactile
 region uses the listed latent dimension and two tokens; F1 predicts raw tactile values.
+The tactile x100 profile multiplies the DFTP taxels by 100 before the tactile encoder
+(`input_scale`), which keeps touch dreaming from collapsing on sparse contact data; see
+[docs/model.md](../docs/model.md#tactile-input-scale).
 
 Model settings are in [configs/htd/](configs/htd/); training options are listed by
 `python train_mxt.py --help`. Keep custom YAMLs with the run for deployment.

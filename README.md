@@ -35,6 +35,39 @@
   <sub>Autonomous policy (HTD) for long-horizon loco-manipulation</sub>
 </p>
 
+## About this fork
+
+This is [Talos Robotics](https://github.com/talos-robotics-ai)' fork of HTD. It trains
+the HTD policy on our own teleoperation data
+([Relo02/loco-manipulation-data](https://huggingface.co/datasets/Relo02/loco-manipulation-data):
+99 takes on a Unitree G1 with Inspire DFTP hands and a head RealSense) and deploys it on
+the teleop stack's G1 walking policy instead of HTD's whole-body controller. The
+pipeline is documented end to end in [docs/](docs/README.md):
+
+| Step | Page | Entry point |
+| --- | --- | --- |
+| Dataset: download from Hugging Face, process, validate | [docs/dataset.md](docs/dataset.md) | `scripts/prepare_dataset.sh` |
+| Model: inputs, action chunk, touch dreaming, tactile input scale | [docs/model.md](docs/model.md) | `htd_policy/configs/htd/` |
+| Training | [docs/training.md](docs/training.md) | `scripts/train_htd.sh` |
+| Evaluation on validation data, in simulation, unit tests | [docs/evaluation.md](docs/evaluation.md) | `policy_rollout/replay_eval.py`, `g1_walk/` |
+| Deployment on the G1 | [docs/deployment.md](docs/deployment.md) | `policy_rollout/`, `g1_walk/` |
+
+On a Linux machine with a CUDA GPU:
+
+```bash
+git clone https://github.com/talos-robotics-ai/humanoid-touch-dream.git
+cd humanoid-touch-dream
+conda create -n htd_policy python=3.10 pip && conda activate htd_policy
+python -m pip install torch==2.9.1 torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -e htd_policy huggingface_hub
+scripts/prepare_dataset.sh      # 15.5 GB download into ~/htd_data, processing (another 15.5 GB), validation
+scripts/train_htd.sh            # about 5.5 hours on an L40S; the run lands in runs/run_white_becker_HTD/
+```
+
+The rest of this page is the upstream guide: HTD's own hardware setup, Vision Pro
+collection and whole-body controller. It applies to upstream's controller path; policies
+trained on our data are deployed through `g1_walk/` instead.
+
 ## System overview
 
 HTD combines a manipulation policy with a whole-body controller (WBC). The
@@ -54,6 +87,7 @@ controller. The modules below cover collection, training, and deployment.
 | [Data collection](data_collect/README.md) | Vision Pro teleoperation, camera/tactile recording, HDF5 preprocessing, and validation |
 | [Policy training](htd_policy/README.md) | HTD, MXT, and ACT training |
 | [Policy rollout](policy_rollout/README.md) | Live HTD, MXT, and ACT (HIT) inference with camera and tactile feedback |
+| [G1 walk](g1_walk/README.md) | Running a trained policy on the teleop stack's G1 walking policy, with the hands and arms driven from the same rollout messages (this fork) |
 
 ## Getting started
 
@@ -63,7 +97,7 @@ for the repaired source recordings in HDF5 format and accompanying camera videos
 Clone the repository:
 
 ```bash
-git clone https://github.com/chrisyrniu/humanoid-touch-dream.git
+git clone https://github.com/talos-robotics-ai/humanoid-touch-dream.git
 cd humanoid-touch-dream
 ```
 
