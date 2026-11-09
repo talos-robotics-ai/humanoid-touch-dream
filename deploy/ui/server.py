@@ -90,6 +90,7 @@ class Telemetry:
         self._jpeg = None
         self._camera_seq = 0
         self._errors = set()
+        self._last_poll = None      # monotonic end of the last sweep over the readers
         self._thread = threading.Thread(target=self._poll, name="ui-dds", daemon=True)
 
     def start(self):
@@ -99,19 +100,19 @@ class Telemetry:
     def _poll(self):
         while True:
             for name, rd in self._readers.items():
-                try:
+                try:   # the whole iteration: a malformed sample must not end the thread
                     samples = [s for s in rd.take(N=4) if s is not None and hasattr(s, "timestamp")]
+                    if not samples:
+                        continue
+                    last, now = samples[-1], time.monotonic()
+                    jpeg = bytes(last.jpeg) if name == "camera" else None
+                    with self._lock:
+                        self._latest[name] = (last, now)
+                        if jpeg is not None:
+                            self._jpeg, self._camera_seq = jpeg, self._camera_seq + 1
                 except Exception as e:
                     self._error(name, e)
-                    continue
-                if not samples:
-                    continue
-                last, now = samples[-1], time.monotonic()
-                jpeg = bytes(last.jpeg) if name == "camera" else None
-                with self._lock:
-                    self._latest[name] = (last, now)
-                    if jpeg is not None:
-                        self._jpeg, self._camera_seq = jpeg, self._camera_seq + 1
+            self._last_poll = time.monotonic()
             time.sleep(POLL_S)
 
     def _error(self, where, e):
@@ -132,8 +133,14 @@ class Telemetry:
             "predicted": (self._convert("predicted", predicted_entry, chunk, rs, latest["predicted_chunk"][1])
                           if chunk is not None else None),
             "ages": {k: (now - latest[k][1] if k in latest else None) for k in self._readers},
+            "dds_alive": self._dds_alive(now),
             "camera_seq": seq,
         })
+
+    def _dds_alive(self, now) -> bool:
+        """The poll thread runs and finished a sweep within the last second."""
+        last = self._last_poll
+        return bool(self._thread.is_alive() and last is not None and now - last <= 1.0)
 
     def _convert(self, what, fn, *args):
         """A malformed sample shows as None on the page instead of breaking every snapshot."""

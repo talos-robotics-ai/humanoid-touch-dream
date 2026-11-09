@@ -10,6 +10,8 @@
   var STALE_BY_TOPIC = { predicted_chunk: 3.0, ui_command: Infinity };
   var MISSING_S = 1e8;          // telemetry reports 1e9 for an input never received
   var LOG_MAX = 200;
+  var NO_DATA_S = 1.0;          // no snapshot for this long: the whole page is stale
+  var PRED_ALPHA = 0.55;        // the predicted chunk: dashed, a lighter tint of its line's colour
 
   var PLOTS = [
     { title: "left hand", unit: "m", minSpan: 0.05,
@@ -34,7 +36,8 @@
     history: {},            // series -> [[t, v], ...], t on the page clock
     pred: null,             // {series, start, interval, horizon, received}
     camUrl: null, camAt: null,
-    log: [], lastLogLine: null,
+    log: [], lastLogLine: null, lastRecentLog: [],
+    lastSnapAt: now(), noData: false,   // page clock of the last snapshot; the watchdog's verdict
     drawPending: false,
     colors: {}
   };
@@ -118,16 +121,45 @@
   function onSnapshot(s) {
     app.snap = s;
     var t = now();
+    app.lastSnapAt = t;
+    app.noData = false;
     if (s.measured && !isStale(s.ages && s.ages.robot_state)) pushMeasured(s.measured, t);
     updatePrediction(s.predicted, t);
     renderState(s);
     renderRobot(s);
     renderCameraInfo(s);
-    if (s.supervisor && s.supervisor.log_line && s.supervisor.log_line !== app.lastLogLine) {
+    if (s.supervisor && s.supervisor.recent_log) {
+      newLogLines(app.lastRecentLog, s.supervisor.recent_log).forEach(function (l) { addLog(l, ""); });
+      app.lastRecentLog = s.supervisor.recent_log;
+      app.lastLogLine = s.supervisor.log_line;
+    } else if (s.supervisor && s.supervisor.log_line && s.supervisor.log_line !== app.lastLogLine) {
       app.lastLogLine = s.supervisor.log_line;
       addLog(s.supervisor.log_line, "");
     }
     scheduleDraw();
+  }
+
+  // recent_log is the supervisor's last lines, oldest first: the new ones are those after the
+  // longest end of the previous window that the current one starts with (exact lines, in order).
+  function newLogLines(prev, cur) {
+    for (var k = Math.min(prev.length, cur.length); k > 0; k--) {
+      var same = true;
+      for (var i = 0; i < k && same; i++) same = prev[prev.length - k + i] === cur[i];
+      if (same) return cur.slice(k);
+    }
+    return cur.slice();
+  }
+
+  // Snapshots stopped (server, DDS or network gone) while the socket may still look open.
+  function watchdog() {
+    var age = now() - app.lastSnapAt;
+    if (age <= NO_DATA_S) return;
+    app.noData = true;
+    $("state-card").classList.add("stale");
+    $("since").textContent = "no data for " + age.toFixed(0) + " s";
+    var ages = $("ages").children;
+    for (var i = 0; i < ages.length; i++) ages[i].classList.add("stale");
+    renderButtons();
   }
 
   // ---- state strip ----------------------------------------------------------
@@ -170,7 +202,7 @@
 
   function renderButtons() {
     var sup = app.snap && app.snap.supervisor;
-    var ready = !!sup && sup.state === "READY" && !isStale(app.snap.ages && app.snap.ages.supervisor);
+    var ready = !!sup && sup.state === "READY" && !app.noData && !isStale(app.snap.ages && app.snap.ages.supervisor);
     $("btn-start").disabled = !(ready && app.connected);
   }
 
@@ -223,6 +255,9 @@
       var text = limit === Infinity && fmtAge(a[1]) === "missing" ? "none yet" : fmtAge(a[1]);
       ages.appendChild(el("li", isStale(a[1], limit) ? "stale" : "", a[0] + " " + text));
     });
+    if (s.dds_alive !== undefined) {
+      ages.appendChild(el("li", s.dds_alive ? "" : "stale", "ui DDS poll " + (s.dds_alive ? "alive" : "stopped")));
+    }
   }
 
   function drawStick(cv, x, y) {
@@ -391,16 +426,16 @@
     p.lines.forEach(function (l, j) {
       var col = c[l[2]];
       var hist = (app.history[l[0]] || []).map(function (q) { return [q[0] - t, q[1]]; });
-      strokeLine(ctx, hist, X, Y, col, []);
-      strokeLine(ctx, predPoints(l[0], t), X, Y, col, [5, 4]);
+      strokeLine(ctx, hist, X, Y, col, [], 1);
+      strokeLine(ctx, predPoints(l[0], t), X, Y, col, [5, 4], PRED_ALPHA);
       var last = hist.length ? hist[hist.length - 1][1] : NaN;
       p.legend[j].textContent = l[1] + " " + (isNum(last) ? last.toPrecision(3) : "—");
     });
     ctx.restore();
   }
 
-  function strokeLine(ctx, pts, X, Y, color, dash) {
-    ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.setLineDash(dash);
+  function strokeLine(ctx, pts, X, Y, color, dash, alpha) {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.setLineDash(dash); ctx.globalAlpha = alpha;
     ctx.beginPath();
     var pen = false;
     pts.forEach(function (q) {
@@ -409,7 +444,7 @@
       pen = true;
     });
     ctx.stroke();
-    ctx.setLineDash([]);
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
   }
 
   // ---- log ------------------------------------------------------------------
@@ -449,6 +484,7 @@
     bindButtons();
     $("log-filter").addEventListener("input", renderLog);
     window.addEventListener("resize", scheduleDraw);
+    setInterval(watchdog, 250);
     connect();
   }
 

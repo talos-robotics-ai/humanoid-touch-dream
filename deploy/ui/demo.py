@@ -1,4 +1,5 @@
 """`server.py --demo`: animated fake telemetry, so the page can be checked without the robot."""
+import collections
 import math
 import time
 from types import SimpleNamespace
@@ -6,7 +7,7 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from deploy.msgs import UI_COMMANDS, PredictedChunk
+from deploy.msgs import RECENT_LOG_LINES, UI_COMMANDS, PredictedChunk
 from deploy.ui.server import NonceSource, jsonable, measured_entry, predicted_entry
 from g1_command import (EEF_POSITION_OFFSET, TORSO_HEIGHT_OFFSET, UNIFIED_TO_UNITREE_EEF_ROT_REMAP,  # noqa: E402
                         rot_mat_to_rpy, rpy_to_rot_mat)    # on sys.path via deploy.g1_spec
@@ -34,6 +35,7 @@ class DemoTelemetry:
         self._t0 = time.monotonic()
         self._nonces = NonceSource()
         self._log = "[supervisor] demo started"
+        self._recent = collections.deque([self._log], maxlen=RECENT_LOG_LINES)
         self._chunk = None          # (PredictedChunk, monotonic arrival)
         self._jpeg, self._jpeg_t, self._seq = None, -1.0, 0
 
@@ -93,7 +95,8 @@ class DemoTelemetry:
             gating=[g % since if "%" in g else g for g in GATING.get(state, [])],
             stick_lx=0.3 * math.sin(t), stick_ly=0.3 * math.cos(t), stick_rx=0.0, stick_ry=0.0,
             buttons=["L1"] if int(t) % 5 == 0 else [], manual_vx=0.0, manual_wz=0.0,
-            tick_p50_ms=0.8, tick_max_ms=2.1, log_line=self._log)
+            tick_p50_ms=0.8, tick_max_ms=2.1, log_line=self._log,
+            recent_log=list(self._recent))
         policy = dict(timestamp=time.time(), ready=supervisor["policy_ready"], publishing=state == "RUNNING",
                       inference_ms=42.0, chunks=int(t / 1.5), overrun_steps=0, robot_state_age_s=0.02,
                       eef_state_age_s=0.02, camera_age_s=0.1, loop_p50_ms=1.2, loop_max_ms=4.0,
@@ -104,6 +107,7 @@ class DemoTelemetry:
             "predicted": predicted_entry(self._chunk[0], rs, self._chunk[1]),
             "ages": {"robot_state": 0.02, "eef_state": 0.02, "supervisor": 0.1, "policy_status": 0.2,
                      "predicted_chunk": now - self._chunk[1], "camera": t - self._jpeg_t, "ui_command": None},
+            "dds_alive": True,
             "camera_seq": self._seq,
         })
 
@@ -115,4 +119,5 @@ class DemoTelemetry:
             raise ValueError(f"unknown command {name!r}")
         nonce = self._nonces.next()
         self._log = f"[supervisor] demo: {name} from {source} (nonce {nonce})"
+        self._recent.append(self._log)
         return nonce

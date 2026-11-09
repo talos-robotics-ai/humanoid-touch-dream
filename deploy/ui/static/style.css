@@ -89,6 +89,7 @@ main { display: flex; flex-direction: column; gap: 12px; padding: 0 16px 16px; m
 .st.lit[data-state="HOLD"], .st.lit[data-state="MANUAL"] { background: var(--hold); border-color: var(--hold); }
 .st.lit[data-state="ESTOP"] { background: var(--estop); border-color: var(--estop); }
 #state-card.stale .st.lit { opacity: 0.45; }
+#state-card.stale #since { color: var(--bad); font-weight: 600; }
 .state-line { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0 4px; }
 .fault { color: var(--bad); font-weight: 600; }
 .conditions, .gating, .ages { list-style: none; margin: 4px 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; }
