@@ -57,3 +57,34 @@ def atomic_process_hdf5(path, transform):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def atomic_write_hdf5(path, write, verify=None):
+    """Create a new episode through a sibling temporary file renamed into place on success.
+
+    write(h5_file) fills the new file; verify(h5_file), if given, then checks it
+    read-only. A failure leaves nothing at path. Never overwrites an existing path.
+    """
+    path = Path(path)
+    if os.path.lexists(path):
+        raise FileExistsError(f"Refusing to overwrite an existing episode: {path}")
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    os.close(descriptor)
+    try:
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(temporary, 0o666 & ~umask)  # mkstemp creates 0600
+        with h5py.File(temporary, "w") as h5_file:
+            write(h5_file)
+            h5_file.flush()
+        if verify is not None:
+            with h5py.File(temporary, "r") as h5_file:
+                verify(h5_file)
+        with open(temporary, "rb") as stream:
+            os.fsync(stream.fileno())
+        if os.path.lexists(path):
+            raise FileExistsError(f"Episode appeared during processing; refusing replacement: {path}")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)

@@ -137,6 +137,48 @@ The trainer sorts the episode paths as strings and holds out the last
 directory records the exact split in `dataset_split.json`. Normalization statistics are
 computed over all episodes unless `--stats_dir` points at training-only directories.
 
+## Filtering idle frames
+
+Mid-task, the operator sometimes holds the arm still in the air to re-anchor the teleop
+reference. The 99 `white_becker` episodes have 46 such pauses of 1 s or more in 31
+episodes (median 1.3 s, longest 7.7 s, 2.2% of all frames), 19 of them within 8 cm of the
+pose where the deployed policy froze. A chunked behaviour-cloning policy sees both "stay"
+and "go" from the same state there and averages them.
+[`filter_idle_frames.py`](../data_collect/data_processing/filter_idle_frames.py) writes a
+copy of a processed task directory with these pauses shortened:
+
+```bash
+python data_collect/data_processing/filter_idle_frames.py \
+  --src ~/htd_data/processed/$TASK --dst ~/htd_data/processed/${TASK}_filtered \
+  --report ~/htd_data/logs/filter_idle_$TASK.json
+```
+
+A frame is idle when every command is below its threshold, computed from frame-to-frame
+differences of the commanded poses:
+
+| Option | Default | Still when |
+| --- | --- | --- |
+| `--arm_v` | 0.01 m/s | both wrists (`actions/left_eef_to_body`, `actions/right_eef_to_body`, xyz) |
+| `--finger_v` | 0.02 m/s | the fastest of the ten fingertips (`actions/left_eef_link`, `actions/right_eef_link`) |
+| `--torso_v` | 0.01 m/s | the torso (`actions/body`, columns 0-2) |
+| `--vx` | 0.05 m/s | forward and lateral base command (`actions/velocity_commands` columns 0 and 1) |
+| `--wz` | 0.1 rad/s | yaw-rate base command (column 2) |
+
+A run of idle frames longer than `--keep_s` (0.3 s) keeps its first 0.3 s and drops the
+rest, so the arrival and the departure stay next to each other in the data. The first
+and last `--edge_s` (2 s) of every episode are never dropped: the policy still learns
+to start from and end at rest. Finger motion with a still arm (grasping) and walking or
+turning with a still arm are not idle.
+
+The source directory is only read. Each output episode has the source's dataset paths,
+dtypes, storage settings and attributes; the dropped rows are removed from every temporal
+dataset (`actions/`, `observations/` including images and tactile, `camera_poses/`) and
+`masks/` is copied unchanged. The destination must be new or empty and needs about as
+much disk space as the source. `--dry_run` prints the per-episode numbers and the summary
+without writing anything; `--report` also saves them as JSON. Validate the copy as in
+step 3; expect more `timestamp_gap` warnings, since each shortened pause leaves one gap.
+Train on it by pointing `DATA` at the `_filtered` directory.
+
 ## Adding your own recordings
 
 New takes recorded with
