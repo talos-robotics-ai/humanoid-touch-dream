@@ -150,9 +150,9 @@ tick. Buttons fire on the press, after a 50 ms debounce.
 | --- | --- | --- |
 | Start | start the policy | READY; elsewhere logged as `start ignored in <STATE>` |
 | X | stop: freeze in place | RUNNING |
-| L1 + Start, held 1.0 s | re-arm | HOLD; MANUAL with the sticks centred |
+| L1 + Start, held 1.0 s | re-arm | HOLD. From MANUAL: centre the sticks, wait for HOLD (1.0 s), then L1 + Start |
 | Y | reset: arms home, hands open, torso nominal | STABILIZING, READY, HOLD; RUNNING (stops first) |
-| left stick forward / back | walk speed vx: up to 0.30 m/s forward, 0.20 m/s back | every state except BOOT and ESTOP; enters MANUAL |
+| left stick forward / back | walk speed vx: up to 0.30 m/s forward, 0.20 m/s back | every state except BOOT and ESTOP, and not while the low-state is stale or a link fault is asserted; enters MANUAL |
 | right stick left / right | yaw rate: up to 0.50 rad/s; stick right turns clockwise | as above |
 | A | the walker's freeze and stand | always: ESTOP, restart needed |
 | L2 + B | the walker damps every motor | always: ESTOP, restart needed |
@@ -160,8 +160,10 @@ tick. Buttons fire on the press, after a 50 ms debounce.
 - **Re-arm: press L1 first, then Start.** A Start pressed more than 50 ms before L1 is
   read as a start.
 - **Sticks.** Deadband 0.3 of full deflection, then proportional up to the maximum. Any
-  deflection beyond the deadband enters MANUAL: the policy stops and the arms hold. The
-  left stick's sideways axis and the right stick's forward axis are not used.
+  deflection beyond the deadband enters MANUAL: the policy stops and the arms hold. Not
+  while the low-state is stale (the sticks then read as centred) or a link fault is
+  asserted (RUNNING then goes to HOLD). The left stick's sideways axis and the right stick's forward axis are
+  not used.
 - **Manual walking is off by default.** Without `--manual_walk on` MANUAL sends walk
   zero. Turn it on only after the
   [check on the gantry](#manual-walking-check-on-the-gantry).
@@ -191,7 +193,9 @@ resume after either. Rollout reads them from the whole desktop, not only its ter
 
 Five terminals, each from the repository root, in this order. The first three are
 [g1_walk's sim sequence](../g1_walk/README.md#running-in-mujoco-on-one-machine) with the
-supervisor on.
+supervisor on. That README's commands predate the supervisor: with today's default its
+controller command runs the supervisor too, so use the sequences on this page (the
+replay tools pass `--supervisor off`).
 
 ```bash
 # 1. the teleop's sim host: G1 with Inspire hands, walker stance, pelvis band
@@ -244,7 +248,9 @@ a session then starts on the first policy frame, without the state machine.
 ## Running on the robot
 
 The walker runs on the laptop and reaches the robot over the cable. The steps follow
-[g1_walk's robot sequence](../g1_walk/README.md#running-on-the-robot-from-this-laptop).
+[g1_walk's robot sequence](../g1_walk/README.md#running-on-the-robot-from-this-laptop),
+whose commands predate the supervisor; with today's default the controller runs it, so
+use the commands below.
 
 1. Robot on its gantry, powered; the laptop on the robot's network (192.168.123.x);
    the RealSense on the laptop.
@@ -282,6 +288,10 @@ The walker runs on the laptop and reaches the robot over the cable. The steps fo
 5. Wait for `HTDPOLICY READY TO DEPLOY`, check the camera image and the plots, then
    press Start.
 
+Do not type in any window while rollout runs: its keys are read desktop-wide, and a `1`
+typed anywhere resets the robot, opening the hands and gliding the arms home
+([Troubleshooting](#troubleshooting)).
+
 Differences from MuJoCo: the controller's real-time power check is enforced; the remote
 works; the hands are the real Inspire hands, which hold their last position in HOLD and
 MANUAL and open only on Reset; the camera is the RealSense. Other camera sources are in
@@ -305,8 +315,13 @@ gantry, with the controller at its default `--manual_walk off`:
    full deflection. Pulled back: negative, down to -0.20.
 2. Push the right stick right. The dot moves right, `manual walk` shows a negative wz
    (clockwise), down to -0.50.
-3. Press each button once and check the name the UI shows under `buttons`.
-4. Release the sticks: HOLD after 1.0 s. Re-arm (L1, then Start, held 1 s).
+3. Release the sticks: HOLD after 1.0 s.
+4. In HOLD, press the buttons one at a time and check the name the UI shows under
+   `buttons`. **Never press A**: the walker reads it as an e-stop, the supervisor
+   latches ESTOP, and the walker and the controller must be restarted, handover
+   included. **Never press L2 and B together**: the walker damps every motor. Y fires a
+   reset (arms home, hands open).
+5. Re-arm (L1, then Start, held 1 s).
 
 If all of it matches, quit the controller (`q`) and start it again with
 `--manual_walk on`. Otherwise leave manual walking off: deflecting a stick still stops
@@ -337,7 +352,8 @@ Sections, top to bottom:
    last transition's reason and any fault. Below, the conditions (walker live, standing
    for N s, policy ready with rollout's reason, policy frames) and the gating text of
    the next transition (see [Troubleshooting](#troubleshooting)). Buttons Start, Stop,
-   Re-arm, Reset, and the `walk` and `manual walk` settings.
+   Re-arm, Reset, and `walk` and `manual walk`: read-only indicators of the
+   controller's `--walk` and `--manual_walk` flags.
 2. **Robot.** Torso height, roll and pitch; the walk command applied; the manual walk
    command from the sticks; the controller's tick time and rollout's loop time (median
    and maximum over the last second); inference time, chunk count and overruns; the two
@@ -410,9 +426,10 @@ and `lower_<reason>` (the walker's composer trip or tilt abort). A silent walker
 
 **Rollout's keys act from any window.** Rollout reads `1`, `2`, `3` through a desktop-wide
 keyboard listener. Typing one of these digits anywhere while rollout runs, for example an
-IP address in another terminal, sends a reset (`1`), or pauses publishing (`3`). After a
-`1` rollout publishes nothing until `2` is pressed; the supervisor then shows
-`no policy frames`. Press `2` to resume.
+IP address in another terminal, sends a reset (`1`), or pauses publishing (`3`). A `1`
+in RUNNING stops the policy and resets: the hands open (a held object drops) and the
+arms glide home. After a `1` rollout publishes nothing until `2` is pressed; the
+supervisor then shows `no policy frames`. Press `2` to resume.
 
 ## Verified numbers
 
