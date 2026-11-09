@@ -40,8 +40,10 @@ or walk-to-reach behaviour because no demonstration contains one. This protocol 
 1. Convert, process and validate as in `dataset.md`.
 2. `filter_idle_frames.py --dry_run` on the new episodes: expect well under 1% dropped.
    More means pauses crept back in.
-3. Check coverage before training: histogram of the grasp point per type and a contact sheet
-   of first frames (the scripts used for the 99 episodes are in the deployment analysis notes).
+3. Check coverage before training: per type, the distribution of the grasp point (left hand
+   pose in `actions/left_eef_to_body` at the first sustained finger closure with tactile
+   contact) and a contact sheet of first camera frames. The new episodes should widen the
+   ranges above, not just add to their centre.
 4. Train on old plus new episodes with the same configs and `--norm_std_floor 0.01`
    (`training.md`). Evaluate open loop with `replay_eval.py`, then on the robot with the
    rollout recorder on (`evaluation.md`), starting from the same failure states as the
