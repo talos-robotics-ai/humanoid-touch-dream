@@ -127,11 +127,19 @@ def _copy_attrs(src, dst):
 
 
 def _copy_rows(src, dst, segments):
+    # A slice of a variable-length dataset whose rows happen to have equal lengths (always
+    # the case for a one-row block, e.g. a 257-frame segment) comes back from h5py as a 2-D
+    # array that cannot be written into a vlen dataset, so those rows go one at a time.
+    vlen = h5py.check_vlen_dtype(src.dtype) is not None
     out = 0
     for start, stop in segments:
         for block in range(start, stop, COPY_BLOCK):
             end = min(block + COPY_BLOCK, stop)
-            dst[out:out + end - block] = src[block:end]
+            if vlen:
+                for i in range(block, end):
+                    dst[out + i - block] = src[i]
+            else:
+                dst[out:out + end - block] = src[block:end]
             out += end - block
 
 

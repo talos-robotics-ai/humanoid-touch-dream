@@ -185,6 +185,21 @@ def test_misaligned_episode_is_an_error_and_leaves_no_output(tmp_path):
     assert not any(p.is_file() for p in dst.rglob('*'))
 
 
+def test_vlen_rows_of_equal_length_and_one_row_blocks_are_copied(tmp_path):
+    # Real failure: episode_82 had a 257-frame kept segment, so its last block was one
+    # JPEG; h5py turns such a slice into a 2-D array and refuses to write it as vlen rows.
+    n = fif.COPY_BLOCK + 3
+    with h5py.File(tmp_path / 'vlen.h5', 'w') as f:
+        src = f.create_dataset('src', (n,), dtype=h5py.vlen_dtype(np.uint8))
+        for i in range(n):
+            src[i] = np.full(7, i % 256, dtype=np.uint8)
+        dst = f.create_dataset('dst', (n - 1,), dtype=h5py.vlen_dtype(np.uint8))
+        fif._copy_rows(src, dst, [(0, fif.COPY_BLOCK + 1), (fif.COPY_BLOCK + 2, n)])
+        rows = [dst[i] for i in range(n - 1)]
+    assert [len(r) for r in rows] == [7] * (n - 1)
+    assert [int(r[0]) for r in rows] == [i % 256 for i in range(fif.COPY_BLOCK + 1)] + [(n - 1) % 256]
+
+
 def _files_under(path):
     return [os.path.join(root, name) for root, _, names in os.walk(path) for name in names]
 
