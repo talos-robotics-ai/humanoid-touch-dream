@@ -66,15 +66,24 @@ class RemoteInput:
         self._down_since: dict[int, float] = {}
         self._fired: set = set()     # buttons whose event already fired in this press
         self._rearm_fired = False
+        self._latch = False          # set by a stale tick: held buttons must be released first
 
     def update(self, snap: RemoteSnapshot, now: float) -> RemoteEvents:
         s = self.spec
+        if snap.stale:
+            self._latch = True
         for b in list(self._down_since):
             if b not in snap.buttons:
                 del self._down_since[b]
                 self._fired.discard(b)
         for b in snap.buttons:
             self._down_since.setdefault(b, now)
+        if self._latch and not snap.stale:
+            # Link just recovered: a button still held is not a new press.
+            self._fired.update(snap.buttons)
+            self._rearm_fired = (s.button_rearm_modifier in snap.buttons
+                                 and s.button_start in snap.buttons)
+            self._latch = False
 
         def fires(b):
             t = self._down_since.get(b)
@@ -96,7 +105,8 @@ class RemoteInput:
         else:
             self._rearm_fired = False
 
-        deflected = abs(snap.ly) > s.deadband or abs(snap.rx) > s.deadband
+        finite = math.isfinite(snap.ly) and math.isfinite(snap.rx)
+        deflected = finite and (abs(snap.ly) > s.deadband or abs(snap.rx) > s.deadband)
         vx, wz = stick_to_walk(snap.ly, snap.rx, s) if deflected else (0.0, 0.0)
         pressed = tuple(BUTTON_NAMES[i] for i in sorted(snap.buttons))
         return RemoteEvents(start, stop, reset, rearm, deflected, vx, wz, pressed)
