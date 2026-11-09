@@ -50,7 +50,7 @@ pipeline is documented end to end in [docs/](docs/README.md):
 | Model: inputs, action chunk, touch dreaming, tactile input scale | [docs/model.md](docs/model.md) | `htd_policy/configs/htd/` |
 | Training | [docs/training.md](docs/training.md) | `scripts/train_htd.sh` |
 | Evaluation on validation data, in simulation, unit tests | [docs/evaluation.md](docs/evaluation.md) | `policy_rollout/replay_eval.py`, `g1_walk/` |
-| Deployment on the G1 | [docs/deployment.md](docs/deployment.md) | `policy_rollout/`, `g1_walk/` |
+| Deployment on the G1 | [docs/deployment.md](docs/deployment.md) | `deploy/`, `g1_walk/`, `policy_rollout/` |
 
 On a Linux machine with a CUDA GPU:
 

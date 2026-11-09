@@ -41,7 +41,9 @@ Lifecycle, the teleop backend's under ``--lower jetson``:
 Keyboard (Enter after each): ``s`` stop and hold, ``g`` accept the policy
 again, ``q`` quit.
 
-``--supervisor on`` hands these decisions to ``deploy.supervisor``
+``--supervisor off`` keeps the lifecycle above (the replay and sim test
+tools pass it). ``--supervisor on``, the default, hands these decisions to
+``deploy.supervisor``
 (docs/superpowers/specs/2026-11-09-deploy-supervisor-ui-design.md): the
 policy drives the robot only once the robot stands, the policy is ready and
 the operator starts it (Unitree remote, UI, ``deploy/ui/cmd.py``); a stop
@@ -111,10 +113,11 @@ def parse_args(argv=None):
                     help="drive the robot even on battery or a power-saving profile (not recommended)")
     ap.add_argument("--hands", default="modbus", choices=("modbus", "none"),
                     help="none runs without the Inspire hands (no eef_state, no touch)")
-    ap.add_argument("--supervisor", default="off", choices=("on", "off"),
-                    help="on: the deployment supervisor decides when the policy drives the "
-                         "robot (start/stop from the remote, the UI or deploy/ui/cmd.py); "
-                         "off: a session starts on the first policy frame")
+    ap.add_argument("--supervisor", default="on", choices=("on", "off"),
+                    help="on (default): the deployment supervisor decides when the policy "
+                         "drives the robot (start/stop from the remote, the UI or "
+                         "deploy/ui/cmd.py); off: a session starts on the first policy frame "
+                         "(the replay and sim test tools pass off)")
     ap.add_argument("--walk", default="on", choices=("on", "off"),
                     help="off: the policy's walk command is replaced by zero for the whole run")
     ap.add_argument("--manual_walk", default="off", choices=("on", "off"),

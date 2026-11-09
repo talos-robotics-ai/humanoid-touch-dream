@@ -336,11 +336,12 @@ One page, one screen, dark or light following the browser. Sections, top to bott
    confirmation). `walk: on/off` and `manual walk: on/off` indicators.
 2. **Robot**: torso height and tilt, walk command applied, remote sticks and pressed
    buttons, control-tick timing from both processes, inference time, the age of every
-   input the UI shows (so a frozen value is visibly stale).
+   input the UI shows (so a frozen value is visibly stale): red after 1 s, the predicted
+   chunk after 3 s (two missed chunks), UI commands never.
 3. **Camera**: the latest `CameraFrame`.
 4. **What happens next**: six time plots sharing one time axis from −6 s to +2 s.
-   Left of 0: the measured state (solid). Right of 0: the predicted chunk (dashed,
-   another colour), redrawn when a new `PredictedChunk` arrives and shifted left as time
+   Left of 0: the measured state (solid). Right of 0: the predicted chunk (dashed, in
+   the colour of its measured line, over a lightly tinted background), redrawn when a new `PredictedChunk` arrives and shifted left as time
    passes until the next one. The predicted step at `interval` (1.5 s) is marked: that is
    where rollout will switch to the next chunk. Groups and units:
 
