@@ -72,8 +72,9 @@ environment.
 
 ## Running in MuJoCo on one machine
 
-Four terminals, each from the repository root, in this order. `PY` is the environment's
-python.
+Five terminals, each from the repository root, in this order. `PY` is the environment's
+python. The full procedure, with the supervisor's states, buttons and UI, is in
+[docs/deployment.md](../docs/deployment.md).
 
 ```bash
 # 1. the teleop's sim host: G1 with Inspire hands, walker stance, pelvis band
@@ -85,16 +86,23 @@ MUJOCO_GL=egl PSI_SIM_HOLD_RELEASE=session $PY sim/sim_host.py --iface lo --lowe
 bash g1_walk/run_walker.sh --iface lo --python $PY
 
 # 3. the controller: runs the walker's handover, then waits for the policy
-PSI_INSPIRE_LEFT_IP=127.0.0.1 PSI_INSPIRE_RIGHT_IP=127.0.0.2 $PY g1_walk/controller.py --iface lo
+PSI_INSPIRE_LEFT_IP=127.0.0.1 PSI_INSPIRE_RIGHT_IP=127.0.0.2 $PY g1_walk/controller.py --iface lo \
+    --supervisor on
 
 # 4. release the sim's pelvis band (the host lets it go over 10 s on the first datagram
 #    to its target-viz port), then start the policy
 $PY -c "import socket; socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'{}', ('127.0.0.1', 14651))"
 cd policy_rollout && $PY policy_rollout.py --dds_interface lo --send_velocity_commands True \
+    --supervisor True --inference_interval 45 \
     --model_path <run dir> ...   # the rest as in policy_rollout/README.md
+
+# 5. the monitoring UI, then open http://127.0.0.1:8765
+$PY deploy/ui/server.py --iface lo --port 8765
 ```
 
-Without `--send_velocity_commands True` the walk stays at zero. Stop in reverse order
+Without `--send_velocity_commands True` the walk stays at zero. Rollout's keyboard keys
+(`1`, `2`, `3`) are disabled in supervisor mode: start, stop, re-arm and reset come from
+the remote, the UI or `deploy/ui/cmd.py`. Stop in reverse order
 (below). The sim's hands report zero touch; their angles follow the commands.
 
 ## Running on the robot from this laptop
@@ -110,11 +118,16 @@ robot's PC2 runs nothing of this module.
    the teleop's SSH tunnel; HTD's rig uses 192.168.123.210 left / .211 right).
 4. ```bash
    bash g1_walk/run_walker.sh --iface <NIC> --python $PY
-   PSI_INSPIRE_LEFT_IP=<left> PSI_INSPIRE_RIGHT_IP=<right> $PY g1_walk/controller.py --iface <NIC>
-   (cd policy_rollout && $PY policy_rollout.py --dds_interface <NIC> --send_velocity_commands True ...)
+   PSI_INSPIRE_LEFT_IP=<left> PSI_INSPIRE_RIGHT_IP=<right> $PY g1_walk/controller.py --iface <NIC> \
+       --supervisor on
+   (cd policy_rollout && $PY policy_rollout.py --dds_interface <NIC> --send_velocity_commands True \
+       --supervisor True --inference_interval 45 ...)
+   $PY deploy/ui/server.py --iface <NIC> --port 8765     # the UI: http://127.0.0.1:8765
    ```
    The controller's handover (3 s gain ramp, 2 s glide, parity check, 5 s blend) puts
-   the legs on the walker; lower the gantry once it prints READY.
+   the legs on the walker; lower the gantry once it prints READY. Rollout's keyboard
+   keys are disabled in supervisor mode; the full procedure is in
+   [docs/deployment.md](../docs/deployment.md#running-on-the-robot).
 
 ## What the controller does
 

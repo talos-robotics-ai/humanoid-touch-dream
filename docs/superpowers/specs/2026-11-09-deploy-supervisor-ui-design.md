@@ -151,12 +151,17 @@ goes on `sys.path` the way `g1_walk/paths.py` already does for other directories
 | READY, HOLD, STABILIZING | MANUAL | any stick deflection beyond the deadband, while the low-state is fresh and no link fault is asserted |
 | MANUAL | HOLD | sticks back inside the deadband for `manual_release_s` (1.0 s), or the robot's low-state older than 0.1 s (the remote snapshot is then unknown: walk goes to zero first). The policy does **not** resume |
 | HOLD | STABILIZING | **re-arm**: remote `L1 + Start` held for 1 s, or UI "Re-arm" (confirmed). The torso is slewed back to nominal (the walker's `stand()`), the arms and hands stay where they are; the standing hold restarts, so READY is reached again only after a fresh 2 s of standing plus the readiness checks, and the policy restarts from a fresh chunk |
-| HOLD, READY, STABILIZING, RUNNING | STABILIZING | **reset**: remote `Y`, UI "Reset" (confirmed), or rollout's `ResetCommand` (its key 1): today's reset, arms glide home, hands open, torso nominal. In RUNNING it stops first (HOLD) and then resets |
+| HOLD, READY, STABILIZING, RUNNING | STABILIZING | **reset**: remote `Y`, UI "Reset" (confirmed), or rollout's `ResetCommand` (its key 1, without `--supervisor` only): today's reset, arms glide home, hands open, torso nominal. In RUNNING it stops first (HOLD) and then resets |
 | any | ESTOP | the walker's own latches: `estop_*` (remote A, damping), `lower_*` (composer trip, tilt abort). Link faults (`link_*`, a silent walker) go to HOLD instead and are cleared by re-arm, as today's session start clears them |
 
 Guards and details:
 
-- Start is accepted in READY only. A start pressed elsewhere is logged and ignored.
+- "The policy's status says it exited" (RUNNING to HOLD) has no explicit exit flag: an
+  exited or crashed rollout stops sending frames, and the `policy_timeout` frame timeout
+  covers it.
+- Start is accepted in READY only. A start pressed elsewhere is logged and ignored, also
+  when another transition fires in the same tick. In READY a reset is evaluated before
+  a lost condition, so a reset in the tick a check drops still resets.
 - Stop is accepted everywhere it means something (RUNNING, MANUAL goes to HOLD when
   sticks are centred). Stop never does anything the walker's A button does: it does not
   freeze the walker's own arm reference or stand through the e-stop path. It ends the
@@ -297,6 +302,10 @@ remain latched regardless of the UI.
   used now: no Jetson computation, the RealSense is on the laptop, so this path encodes).
 - `PolicyStatus` at 5 Hz from the same status thread.
 - The existing keys 1/2/3 keep working for upstream-style use without `--supervisor`.
+  With `--supervisor` the desktop-wide keyboard listener is not started (and `pynput` not
+  imported): commands come from the remote, the UI or `deploy/ui/cmd.py`.
+- With `--supervisor`, inference and publishing start only once a robot state, a hand
+  state and a real head frame have each arrived within 1 s (logged once).
 - A synthetic head-camera source for sim stack tests (`--head_camera_source static`,
   a fixed image or a sim render): left to the builder to place where the existing
   camera sources live, coordinated with the other session that owns `head_camera.py`.
@@ -318,8 +327,12 @@ remain latched regardless of the UI.
   extra small write), not from the control thread. Fields: state, since (s), reason of
   the last transition, the flags (`walker_live`, `standing`, `standing_for_s`,
   `policy_ready`, `frames_fresh`, `walk_enabled`), the remote snapshot (sticks, pressed
-  buttons), the manual walk command, the last log line, and the controller's control-tick
-  timing (p50 and max of the last second) so the UI can show the loop is healthy.
+  buttons), the manual walk command, the last log line and the last 12 log lines
+  (`recent_log`, oldest first), and the controller's control-tick timing (p50 and max of
+  the last second) so the UI can show the loop is healthy. The control thread writes one
+  extra status on each state change, so the RUNNING edge reaches rollout within its
+  listener poll (budget: write ~1 ms + poll <= 20 ms + DDS ~3 ms + one rollout tick
+  33 ms, inside `start_frame_margin_s` = 0.15 s).
 - Keyboard `s`/`g`/`q` remain: `s` = stop, `g` = re-arm, `q` = quit; `r` = reset.
 - Hands: in HOLD and MANUAL the hand loop stops sending (the Inspire hands hold their
   last position); only Reset opens them.
@@ -337,11 +350,14 @@ One page, one screen, dark or light following the browser. Sections, top to bott
 2. **Robot**: torso height and tilt, walk command applied, remote sticks and pressed
    buttons, control-tick timing from both processes, inference time, the age of every
    input the UI shows (so a frozen value is visibly stale): red after 1 s, the predicted
-   chunk after 3 s (two missed chunks), UI commands never.
+   chunk after 3 s (two missed chunks), UI commands never; and whether the server's DDS
+   poll thread is alive (polled within 1 s). A page watchdog (250 ms) marks the state
+   card and every age stale, disables Start and shows `no data for N s` once no
+   snapshot has arrived for 1 s, until snapshots resume.
 3. **Camera**: the latest `CameraFrame`.
 4. **What happens next**: six time plots sharing one time axis from −6 s to +2 s.
    Left of 0: the measured state (solid). Right of 0: the predicted chunk (dashed, in
-   the colour of its measured line, over a lightly tinted background), redrawn when a new `PredictedChunk` arrives and shifted left as time
+   a lighter tint of its measured line's colour, alpha 0.55, over a lightly tinted background), redrawn when a new `PredictedChunk` arrives and shifted left as time
    passes until the next one. The predicted step at `interval` (1.5 s) is marked: that is
    where rollout will switch to the next chunk. Groups and units:
 
@@ -361,7 +377,9 @@ One page, one screen, dark or light following the browser. Sections, top to bott
    Measured history is kept in the browser (a ring buffer per line); the server does not
    store history.
 5. **Log**: the last 200 `[supervisor]` lines and the `HTDPOLICY READY TO DEPLOY` line,
-   newest at the bottom, with a filter box.
+   newest at the bottom, with a filter box. Each status's `recent_log` is merged in
+   (exact lines, order kept, the overlap with the previous status's window dropped), so
+   no line is lost between two statuses.
 
 The server (`deploy/ui/server.py --iface IFACE --port 8765`) subscribes to the topics
 with best-effort, keep-last-1 QoS, coalesces to one JSON message per 100 ms (camera

@@ -116,7 +116,9 @@ walker's own tilt abort remains the fall guard.
 robot state, a hand state and a camera frame have each arrived within the last second,
 and the last inference fit the chunk budget (half the inference interval). The status
 itself must be younger than 1 s, and a policy frame must have arrived within 0.5 s.
-Frames do not count while the arms glide home.
+Frames do not count while the arms glide home. Rollout runs no inference and publishes
+no frame until a robot state, a hand state and a real head frame have each arrived (it
+logs `observations present: inference and publishing start`).
 
 **Start.** The robot executes only chunks planned after the start: rollout restarts its
 chunk when it sees RUNNING, and the controller ignores frames older than the start plus
@@ -134,12 +136,12 @@ hands where they are, clears a link fault and restarts the 2 s standing hold. Th
 can be restarted while the robot holds an object.
 
 **Reset** is separate: the arms glide home, the hands open, the torso goes to nominal.
-In RUNNING it stops first. Rollout's key `1` sends the same reset, after which rollout
-publishes nothing until `2` is pressed.
+In RUNNING it stops first.
 
 **HOLD or ESTOP.** A silent walker or a link blip goes to HOLD from RUNNING and MANUAL,
-and back to STABILIZING from READY; re-arm (or reset) clears it. The walker's own latches go to ESTOP: remote A, L2+B, a walker fault or its tilt
-abort. They hold until the processes restart (at least the walker and the controller).
+and back to STABILIZING from READY; re-arm (or reset) clears it. The walker's own
+latches go to ESTOP: remote A, L2+B, a walker fault or its tilt abort. They hold until
+the processes restart (at least the walker and the controller).
 
 ## Buttons and sticks
 
@@ -162,8 +164,8 @@ tick. Buttons fire on the press, after a 50 ms debounce.
 - **Sticks.** Deadband 0.3 of full deflection, then proportional up to the maximum. Any
   deflection beyond the deadband enters MANUAL: the policy stops and the arms hold. Not
   while the low-state is stale (the sticks then read as centred) or a link fault is
-  asserted (RUNNING then goes to HOLD). The left stick's sideways axis and the right stick's forward axis are
-  not used.
+  asserted (RUNNING then goes to HOLD). The left stick's sideways axis and the right
+  stick's forward axis are not used.
 - **Manual walking is off by default.** Without `--manual_walk on` MANUAL sends walk
   zero. Turn it on only after the
   [check on the gantry](#manual-walking-check-on-the-gantry).
@@ -180,13 +182,16 @@ The same commands, without the remote:
 | command line | `cmd.py start` | `cmd.py stop` | `cmd.py rearm` | `cmd.py reset` |
 | controller terminal (Enter after each) | | `s` | `g` | `r` |
 
-`cmd.py` is `$PY deploy/ui/cmd.py --iface <iface> <command>`. `q` in the controller
+`cmd.py` is `$PY deploy/ui/cmd.py --iface <iface> <command>`; it waits up to 2 s for
+the command topic's reader and exits with 1 and a message if none matched (the
+controller or the UI not running on that interface). `q` in the controller
 terminal quits: the walker stands and keeps balancing. A UI or command-line command
 older than 0.5 s is dropped, and the remote wins over them: a stick deflection in the
 same tick as a UI start enters MANUAL.
 
-Rollout's own keys stay: `1` reset, `3` pause publishing (HOLD follows after 0.5 s), `2`
-resume after either. Rollout reads them from the whole desktop, not only its terminal
+Rollout's keys `1`, `2`, `3` are disabled with `--supervisor True`: it starts no keyboard
+listener and prints `supervisor mode: keyboard keys 1/2/3 disabled; use the remote, the UI
+or deploy/ui/cmd.py`. Without the supervisor they act as before
 (see [Troubleshooting](#troubleshooting)).
 
 ## Running in MuJoCo
@@ -288,10 +293,6 @@ use the commands below.
 5. Wait for `HTDPOLICY READY TO DEPLOY`, check the camera image and the plots, then
    press Start.
 
-Do not type in any window while rollout runs: its keys are read desktop-wide, and a `1`
-typed anywhere resets the robot, opening the hands and gliding the arms home
-([Troubleshooting](#troubleshooting)).
-
 Differences from MuJoCo: the controller's real-time power check is enforced; the remote
 works; the hands are the real Inspire hands, which hold their last position in HOLD and
 MANUAL and open only on Reset; the camera is the RealSense. Other camera sources are in
@@ -299,8 +300,9 @@ MANUAL and open only on Reset; the camera is the RealSense. Other camera sources
 options (`--crossfade_steps`, `--async_inference`, `--checkpoint`, `--dream_touch`) in
 [policy_rollout/README.md](../policy_rollout/README.md#run-htd-or-mxt).
 
-Stop in reverse order: rollout (Ctrl-C), the controller (`q`: the walker stands and
-keeps balancing), then the walker, with the robot on the gantry or sitting first
+To stop: press Stop (X or the UI), then Reset if the arms should go home and the hands
+open, then quit rollout (Ctrl-C), the controller (`q`: the walker stands and keeps
+balancing), the walker, with the robot on the gantry or sitting first
 ([g1_walk's safety notes](../g1_walk/README.md#stopping-and-safety)). The UI can be
 stopped at any time.
 
@@ -319,9 +321,9 @@ gantry, with the controller at its default `--manual_walk off`:
 4. In HOLD, press the buttons one at a time and check the name the UI shows under
    `buttons`. **Never press A**: the walker reads it as an e-stop, the supervisor
    latches ESTOP, and the walker and the controller must be restarted, handover
-   included. **Never press L2 and B together**: the walker damps every motor. Y fires a
-   reset (arms home, hands open).
-5. Re-arm (L1, then Start, held 1 s).
+   included. **Never press L2 and B together**: the walker damps every motor.
+5. Press Y last: it fires a reset (arms home, hands open) and leaves HOLD for
+   STABILIZING, so no re-arm is needed after it.
 
 If all of it matches, quit the controller (`q`) and start it again with
 `--manual_walk on`. Otherwise leave manual walking off: deflecting a stick still stops
@@ -360,13 +362,14 @@ Sections, top to bottom:
    sticks and the pressed buttons; the age of every input.
 3. **Camera.** The policy's head image, at most 5 frames per second, with its age.
 4. **What happens next.** Six plots on one time axis, -6 s to +2 s. Left of 0, the
-   measured state (solid). Right of 0, the latest predicted chunk (dashed, same colour
-   as its measured line, over a tinted background), shifted left as time passes until
+   measured state (solid). Right of 0, the latest predicted chunk (dashed, a lighter
+   tint of its measured line's colour, over a tinted background), shifted left as time passes until
    the next chunk arrives. The vertical mark is the chunk's step 45 (1.5 s after it was
    planned), where rollout switches to the next chunk.
-5. **Log.** The supervisor's latest line as it arrives with its 10 Hz status, plus the
-   page's own lines (connected, command sent); the last 200, newest at the bottom, with
-   a filter box. The log file is the complete record.
+5. **Log.** The supervisor's recent lines: each status carries its last 12, so a line is
+   not lost between two statuses and the lines from before the page was opened show
+   too. Plus the page's own lines (connected, command sent); the last 200, newest at the
+   bottom, with a filter box. The log file is the complete record.
 
 The prediction is drawn as the command the robot will receive, in the frame the
 measured state is reported in:
@@ -381,7 +384,10 @@ measured state is reported in:
 
 **Ages.** An input older than 1 s is shown red; the predicted chunk after 3 s (one
 arrives every 1.5 s, so red means two were missed). A stale supervisor status greys the
-state section and disables Start.
+state section and disables Start. `ui DDS poll` is red when the server's DDS thread has
+stopped or not polled within 1 s. If the page receives no snapshot for 1 s (server,
+browser link or DDS gone), it marks the state and every age stale, disables Start and
+shows `no data for N s` in the state line until snapshots resume.
 
 ## Troubleshooting
 
@@ -394,7 +400,7 @@ The UI's gating list and the controller log say what holds a state.
 | `standing: height,tilt,...` | these checks fail now (`walker`, `height`, `tilt`, `gyro`, `legs`, `stale`) | let the robot settle on its feet; after a stop, re-arm brings the torso to nominal height. `stale`: the robot's low-state is not arriving |
 | `standing 1.3 / 2.0 s` | all checks pass, the 2 s hold is counting | wait |
 | `policy not ready` | rollout's status is not ready, or older than 1 s; the conditions line gives rollout's reason | see the next table |
-| `no policy frames` | no frame from rollout within 0.5 s, or the arms are gliding home | wait for the glide; check rollout runs with `--supervisor True` on the same interface and is not paused |
+| `no policy frames` | no frame from rollout within 0.5 s, or the arms are gliding home | wait for the glide; check rollout runs with `--supervisor True` on the same interface and has logged `observations present` |
 | `press Start` | READY | start |
 | `re-arm: L1+Start 1 s, or Reset` | HOLD | re-arm or reset |
 | `release the sticks` | MANUAL | centre the sticks for 1.0 s |
@@ -415,7 +421,7 @@ Why the robot went to HOLD (the log line's reason):
 | Reason | Cause |
 | --- | --- |
 | `stop` | X, the UI, `cmd.py stop`, `s`; also the arm jump guard refusing every command for 50 frames, or the walker refusing to engage (logged as `[supervisor] stop: ...` first) |
-| `policy frames stopped` | no frame for 0.5 s: rollout ended, crashed or was paused (key `3`), or no fresh frame came after a start |
+| `policy frames stopped` | no frame for 0.5 s: rollout ended or crashed, or no fresh frame came after a start |
 | `link fault: <reason>` | the walker fell silent or the state link dropped |
 | `sticks released for 1.0 s` | MANUAL ended |
 | `low-state stale` | MANUAL with the robot's low-state older than 0.1 s |
@@ -424,12 +430,11 @@ ESTOP reasons: `estop_<reason>` (remote A, L2+B damping, or a latch the walker r
 and `lower_<reason>` (the walker's composer trip or tilt abort). A silent walker,
 `lower_jetson_silent_<age>s`, is a link fault and goes to HOLD instead.
 
-**Rollout's keys act from any window.** Rollout reads `1`, `2`, `3` through a desktop-wide
-keyboard listener. Typing one of these digits anywhere while rollout runs, for example an
-IP address in another terminal, sends a reset (`1`), or pauses publishing (`3`). A `1`
-in RUNNING stops the policy and resets: the hands open (a held object drops) and the
-arms glide home. After a `1` rollout publishes nothing until `2` is pressed; the
-supervisor then shows `no policy frames`. Press `2` to resume.
+**Rollout's keys.** With `--supervisor True` rollout starts no keyboard listener: `1`,
+`2`, `3` do nothing, and typing digits in any window is safe. Without the supervisor it
+reads them through a desktop-wide listener: a `1` typed anywhere, for example in an IP
+address, sends a reset (the hands open, the arms glide home), `3` pauses publishing and
+`2` resumes.
 
 ## Verified numbers
 
@@ -460,7 +465,7 @@ The RUNNING tick carries the arm IK solve, about 25 ms, as before the supervisor
 No robot or camera is needed:
 
 ```bash
-PYTHONPATH= $PY -m pytest deploy/tests -q                                  # 86 tests: supervisor, standing, remote, plots, UI server
+PYTHONPATH= $PY -m pytest deploy/tests -q                                  # 97 tests: supervisor, standing, remote, plots, UI server
 PYTHONPATH= $PY -m unittest discover -s g1_walk/tests -p 'test_*.py'       # g1_walk command shaping, walk gate, hands
 bash deploy/tests/sim_supervisor.sh --model_path RUN_DIR --python $PY      # the whole stack in MuJoCo, about 2 min
 ```

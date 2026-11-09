@@ -42,7 +42,6 @@ done
 [[ -n "$MODEL" && -d "$MODEL" ]] || { echo "pass --model_path RUN_DIR (a directory)" >&2; exit 2; }
 MODEL="$(cd "$MODEL" && pwd)"
 export PYTHONPATH=""        # a ROS PYTHONPATH in the shell breaks the stack's imports
-export DISPLAY="${DISPLAY:-:1}"   # rollout's keyboard listener (pynput) needs an X display
 PORT=8765
 WINDOW_S=20
 RUN_S=10
