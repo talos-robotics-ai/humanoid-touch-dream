@@ -124,3 +124,87 @@ def test_gating_texts_in_stabilizing():
     assert d.state is State.BOOT
     d = sup.step(inputs(standing=StandingReport(False, 1.3, ()), policy_ready=False, frame_fresh=False), 0.1)
     assert d.gating == ("standing 1.3 / 2.0 s", "policy not ready", "no policy frames")
+
+
+def to_running(sup):
+    to_ready(sup)
+    sup.step(inputs(ui=("start",)), 1.0)
+
+def test_deflected_with_link_fault_stays_hold_without_cycling():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_running(sup)
+    assert sup.step(inputs(fault="link_watchdog", remote=remote(deflected=True)), 2.0).state is State.HOLD
+    for k in range(5):
+        d = sup.step(inputs(fault="link_watchdog", remote=remote(deflected=True)), 2.1 + k * 0.1)
+        assert d.state is State.HOLD and d.actions == () and d.log == ()
+
+def test_deflected_with_stale_lowstate_stays_hold_without_cycling():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_ready(sup)
+    sup.step(inputs(remote=remote(deflected=True)), 1.0)
+    assert sup.step(inputs(remote=remote(deflected=True), lowstate_stale=True), 1.1).state is State.HOLD
+    for k in range(5):
+        d = sup.step(inputs(remote=remote(deflected=True), lowstate_stale=True), 1.2 + k * 0.1)
+        assert d.state is State.HOLD and d.actions == () and d.log == ()
+
+def test_ready_drops_on_fault_and_ready_line_waits_for_it_to_clear():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_ready(sup)
+    d = sup.step(inputs(fault="link_watchdog"), 1.0)
+    assert d.state is State.STABILIZING and d.reason == "fault: link_watchdog"
+    d = sup.step(inputs(fault="link_watchdog"), 1.1)
+    assert d.state is State.STABILIZING and "HTDPOLICY READY TO DEPLOY" not in d.log
+    d = sup.step(inputs(), 1.2)
+    assert d.state is State.READY and d.log[-1] == "HTDPOLICY READY TO DEPLOY"
+
+def test_classify_fault_fail_closed_and_damp():
+    assert classify_fault("damp") == "estop" and classify_fault("damped") == "estop"
+    assert classify_fault("jetson_silent") == "link" and classify_fault("something_new") == "link"
+
+def test_ready_start_and_deflected_in_one_tick_goes_manual():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_ready(sup)
+    d = sup.step(inputs(remote=remote(start=True, deflected=True)), 1.0)
+    assert d.state is State.MANUAL and d.actions == ("engage_manual",)
+
+def test_estop_ignores_every_command():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_ready(sup)
+    sup.step(inputs(fault="estop_operator"), 1.0)
+    every = ("start", "stop", "rearm", "reset")
+    d = sup.step(inputs(fault="estop_operator", ui=every, keyboard=every,
+                        remote=remote(start=True, stop=True, rearm=True, reset=True, deflected=True)), 2.0)
+    assert d.state is State.ESTOP and d.actions == () and not d.changed
+
+def test_running_stop_and_reset_together_holds():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_running(sup)
+    d = sup.step(inputs(remote=remote(stop=True, reset=True)), 2.0)
+    assert d.state is State.HOLD and d.actions == ("freeze",)
+
+def test_manual_stale_with_rearm_holds():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_ready(sup)
+    sup.step(inputs(remote=remote(deflected=True)), 1.0)
+    d = sup.step(inputs(lowstate_stale=True, remote=remote(rearm=True)), 1.1)
+    assert d.state is State.HOLD and d.actions == ("freeze",)
+
+def test_reset_from_hold():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_running(sup)
+    sup.step(inputs(remote=remote(stop=True)), 2.0)
+    d = sup.step(inputs(ui=("reset",)), 3.0)
+    assert d.state is State.STABILIZING and d.actions == ("reset",)
+
+def test_redeflection_restarts_release_timer():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_ready(sup)
+    sup.step(inputs(remote=remote(deflected=True)), 1.0)
+    sup.step(inputs(), 1.5)                                          # centred, timer starts
+    sup.step(inputs(remote=remote(deflected=True)), 2.0)             # re-deflected: timer resets
+    assert sup.step(inputs(), 2.2).state is State.MANUAL            # timer restarts here
+    assert sup.step(inputs(), 3.0).state is State.MANUAL            # only 0.8 s centred
+    assert sup.step(inputs(), 3.3).state is State.HOLD
+
+def test_manual_to_hold_on_link_fault():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_ready(sup)
+    sup.step(inputs(remote=remote(deflected=True)), 1.0)
+    d = sup.step(inputs(remote=remote(deflected=True), fault="link_watchdog"), 1.1)
+    assert d.state is State.HOLD and d.actions == ("freeze",) and "link" in d.reason
+
+def test_first_ready_log_line_is_exact():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0)
+    sup.step(inputs(), 0.0)
+    d = sup.step(inputs(), 0.1)
+    assert d.log[0] == "[supervisor] STABILIZING -> READY: standing 2.0 s, policy ready, frames fresh"

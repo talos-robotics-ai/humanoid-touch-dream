@@ -52,7 +52,6 @@ class Decision:
 @dataclass
 class _Ctx:
     i: Inputs
-    state: State
     fault_class: str | None
     start: bool
     stop: bool
@@ -63,10 +62,13 @@ class _Ctx:
 
     @property
     def ok(self) -> bool:
-        return self.i.standing.standing and self.i.policy_ready and self.i.frame_fresh
+        return (self.i.standing.standing and self.i.policy_ready and self.i.frame_fresh
+                and self.fault_class is None)
 
 
 def _lost(c: _Ctx) -> str:
+    if c.fault_class is not None:
+        return f"fault: {c.i.fault}"
     if not c.i.standing.standing:
         return "standing lost: " + ",".join(c.i.standing.failing) if c.i.standing.failing else "standing lost"
     if not c.i.policy_ready:
@@ -94,25 +96,32 @@ def _manual_exit(c: _Ctx) -> str | None:
     return None
 
 
-S, R, RU, H, M, ST, B = (State.STABILIZING, State.READY, State.RUNNING, State.HOLD,
-                         State.MANUAL, State.ESTOP, State.BOOT)
-
 # (from states, to, guard -> reason or None, entry actions); first match wins.
 # The ESTOP row is handled separately in step() because it applies to every state but ESTOP.
+def _manual_entry(c: _Ctx) -> str | None:
+    # Not while an exit condition holds, or HOLD <-> MANUAL would alternate every tick.
+    if c.i.remote.deflected and not c.i.lowstate_stale and c.fault_class != "link":
+        return "sticks deflected"
+    return None
+
+
 _TABLE = (
-    ({B}, S, lambda c: "walker live" if c.i.walker_live else None, lambda f: ()),
-    ({S, R, H, RU}, M, lambda c: "sticks deflected" if c.i.remote.deflected else None,
-     lambda f: ("freeze", "engage_manual") if f is RU else ("engage_manual",)),
-    ({S}, R, lambda c: "standing %.1f s, policy ready, frames fresh" % c.i.standing.held_s if c.ok else None,
+    ({State.BOOT}, State.STABILIZING, lambda c: "walker live" if c.i.walker_live else None, lambda f: ()),
+    ({State.STABILIZING, State.READY, State.HOLD, State.RUNNING}, State.MANUAL, _manual_entry,
+     lambda f: ("freeze", "engage_manual") if f is State.RUNNING else ("engage_manual",)),
+    ({State.STABILIZING}, State.READY,
+     lambda c: "standing %.1f s, policy ready, frames fresh" % c.i.standing.held_s if c.ok else None,
      lambda f: ("log_ready",)),
-    ({R}, S, lambda c: None if c.ok else _lost(c), lambda f: ()),
-    ({R}, RU, lambda c: "start" if c.start else None, lambda f: ("start_session",)),
-    ({RU}, H, _running_exit, lambda f: ("freeze",)),
-    ({M}, H, _manual_exit, lambda f: ("freeze",)),
-    ({H}, S, lambda c: "re-arm" if c.rearm else None, lambda f: ("stand",)),
-    ({M}, S, lambda c: "re-arm" if c.rearm and not c.i.remote.deflected else None, lambda f: ("freeze", "stand")),
-    ({S, R, H}, S, lambda c: "reset" if c.reset else None, lambda f: ("reset",)),
-    ({RU}, S, lambda c: "reset" if c.reset else None, lambda f: ("freeze", "reset")),
+    ({State.READY}, State.STABILIZING, lambda c: None if c.ok else _lost(c), lambda f: ()),
+    ({State.READY}, State.RUNNING, lambda c: "start" if c.start else None, lambda f: ("start_session",)),
+    ({State.RUNNING}, State.HOLD, _running_exit, lambda f: ("freeze",)),
+    ({State.MANUAL}, State.HOLD, _manual_exit, lambda f: ("freeze",)),
+    ({State.HOLD}, State.STABILIZING, lambda c: "re-arm" if c.rearm else None, lambda f: ("stand",)),
+    ({State.MANUAL}, State.STABILIZING,
+     lambda c: "re-arm" if c.rearm and not c.i.remote.deflected else None, lambda f: ("freeze", "stand")),
+    ({State.STABILIZING, State.READY, State.HOLD}, State.STABILIZING,
+     lambda c: "reset" if c.reset else None, lambda f: ("reset",)),
+    ({State.RUNNING}, State.STABILIZING, lambda c: "reset" if c.reset else None, lambda f: ("freeze", "reset")),
 )
 
 
@@ -134,9 +143,13 @@ class Supervisor:
                 self._centred_since = now
         released = 0.0 if self._centred_since is None else now - self._centred_since
         i = inputs
-        flag = lambda name: bool(getattr(i.remote, name, False)) or name in i.ui or name in i.keyboard
-        c = _Ctx(i, prev, classify_fault(i.fault), flag("start"), flag("stop"), flag("rearm"),
-                 flag("reset"), released, self.spec.manual_release_s)
+
+        def flag(name: str, remote_event: bool) -> bool:
+            return remote_event or name in i.ui or name in i.keyboard
+
+        r = i.remote
+        c = _Ctx(i, classify_fault(i.fault), flag("start", r.start), flag("stop", r.stop),
+                 flag("rearm", r.rearm), flag("reset", r.reset), released, self.spec.manual_release_s)
 
         target, reason, entry = None, "", ()
         if prev is not State.ESTOP and c.fault_class == "estop":
@@ -174,6 +187,8 @@ class Supervisor:
             out = []
             if not i.walker_live:
                 out.append("walker not live")
+            if i.fault is not None:
+                out.append(f"fault: {i.fault}")
             if not i.standing.standing:
                 out.append("standing: " + ",".join(i.standing.failing) if i.standing.failing
                            else "standing %.1f / %.1f s" % (i.standing.held_s, self.spec.standing_hold_s))
