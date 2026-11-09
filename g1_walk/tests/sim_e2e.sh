@@ -3,7 +3,7 @@
 #
 #   the pinned teleop's G1 sim host (Inspire hands emulated over Modbus)
 #   + the walker (g1_walk/run_walker.sh --iface lo, network on the GPU)
-#   + the HTD-side controller (g1_walk/controller.py --iface lo)
+#   + the HTD-side controller (g1_walk/controller.py --iface lo --supervisor off)
 #   + tests/sim_drive.py playing policy_rollout's part and scoring the run.
 #
 #   bash g1_walk/tests/sim_e2e.sh [--python PY]

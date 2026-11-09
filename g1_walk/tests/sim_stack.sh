@@ -3,7 +3,7 @@
 #
 #   the pinned teleop's G1 sim host (Inspire hands emulated over Modbus)
 #   + the walker (g1_walk/run_walker.sh --iface lo, network on the GPU)
-#   + the HTD-side controller (g1_walk/controller.py --iface lo)
+#   + the HTD-side controller (g1_walk/controller.py --iface lo --supervisor off)
 #
 # The caller sets MOD (the g1_walk directory), PY, LOG and NAME (log prefix),
 # optionally SIM_ENV (extra VAR=value words for the sim host, e.g. PSI_SIM_VIDEO),
@@ -77,7 +77,7 @@ stack_start() {
 
     say "controller (handover runs now)"
     env PYTHONUNBUFFERED=1 PSI_INSPIRE_LEFT_IP=127.0.0.1 PSI_INSPIRE_RIGHT_IP=127.0.0.2 \
-        "$PY" "$MOD/controller.py" --iface lo < /dev/null > "$LOG/controller.log" 2>&1 &
+        "$PY" "$MOD/controller.py" --iface lo --supervisor off < /dev/null > "$LOG/controller.log" 2>&1 &
     CTRL_PID=$!
     wait_for "$LOG/controller.log" "^READY:" 120 "$CTRL_PID" || return 1
 }
