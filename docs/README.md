@@ -51,3 +51,5 @@ teleop takes ──htd-dataset-converter──► HTD raw episodes ──► Hug
 | `robot_control/` | upstream's controller, kinematics and assets (the URDFs and hand retargeting are used by `g1_walk`) |
 | `scripts/` | `prepare_dataset.sh`, `train_htd.sh` |
 | `docs/` | these pages |
+
+- [data_collection.md](data_collection.md): protocol for the broader demonstration set (nominal, walk-in, recovery episodes).

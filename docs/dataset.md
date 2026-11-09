@@ -194,3 +194,5 @@ syncs each take to the training machine and converts it there). Its output is th
 `htd/g1_inspire_wb/...` layout as the Hugging Face folder, so steps 2 and 3 apply
 unchanged. The field-by-field contract of the raw episode format is in that repository's
 `docs/htd_raw_format.md`.
+
+Collecting more demonstrations: see [data_collection.md](data_collection.md).
