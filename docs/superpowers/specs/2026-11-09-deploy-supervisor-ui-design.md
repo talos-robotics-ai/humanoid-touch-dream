@@ -150,7 +150,7 @@ goes on `sys.path` the way `g1_walk/paths.py` already does for other directories
 | RUNNING | MANUAL | any stick deflection beyond the deadband, while the low-state is fresh and no link fault is asserted (otherwise RUNNING goes to HOLD, below) |
 | READY, HOLD, STABILIZING | MANUAL | any stick deflection beyond the deadband, while the low-state is fresh and no link fault is asserted |
 | MANUAL | HOLD | sticks back inside the deadband for `manual_release_s` (1.0 s), or the robot's low-state older than 0.1 s (the remote snapshot is then unknown: walk goes to zero first). The policy does **not** resume |
-| HOLD | STABILIZING | **re-arm**: remote `L1 + Start` held for 1 s, or UI "Re-arm" (confirmed). The torso is slewed back to nominal (the walker's `stand()`), the arms and hands stay where they are; READY is reached again only through the standing and readiness checks, and the policy restarts from a fresh chunk |
+| HOLD | STABILIZING | **re-arm**: remote `L1 + Start` held for 1 s, or UI "Re-arm" (confirmed). The torso is slewed back to nominal (the walker's `stand()`), the arms and hands stay where they are; the standing hold restarts, so READY is reached again only after a fresh 2 s of standing plus the readiness checks, and the policy restarts from a fresh chunk |
 | HOLD, READY, STABILIZING, RUNNING | STABILIZING | **reset**: remote `Y`, UI "Reset" (confirmed), or rollout's `ResetCommand` (its key 1): today's reset, arms glide home, hands open, torso nominal. In RUNNING it stops first (HOLD) and then resets |
 | any | ESTOP | the walker's own latches: `estop_*` (remote A, damping), `lower_*` (composer trip, tilt abort). Link faults (`link_*`, a silent walker) go to HOLD instead and are cleared by re-arm, as today's session start clears them |
 
@@ -383,12 +383,14 @@ What the control threads do that they did not do before:
 All new publishers use best-effort QoS with history depth 1, so a slow or absent
 subscriber never blocks a writer. The UI process is separate and runs at `nice 10`.
 
-Verification (part of the build, in MuJoCo): run the full stack for 60 s with and
-without the UI connected, and compare the controller's control-tick p50/max and
-rollout's loop overrun count, both already measured in the processes and now carried in
-`SupervisorStatus`/`PolicyStatus`. Acceptance: no difference beyond noise (max tick
-time stays under half the period, 10 ms for the controller, 16 ms for rollout). The
-numbers go into `g1_walk/README.md`.
+Verification (part of the build, in MuJoCo): run the full stack with and without a UI
+client connected and compare the controller's control-tick p50/max and rollout's loop
+times, both measured in the processes and carried in `SupervisorStatus`/`PolicyStatus`.
+Acceptance, in READY: max tick under 10 ms in both windows (half the controller period),
+p50 within 1 ms and max within 2 ms of each other; rollout loop max under 16 ms. In
+RUNNING (whose ticks carry today's arm IK solve on the control thread, about 25 ms p50
+on the laptop sim, a pre-existing cost) the p50 with the UI connected stays within 2 ms
+of the same run's p50 without a client. The numbers go into `docs/deployment.md`.
 
 ## Testing
 
