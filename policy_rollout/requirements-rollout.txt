@@ -14,6 +14,8 @@ opencv-python>=4.10
 cyclonedds==0.10.2
 pyzmq>=27.0
 pynput==1.8.2
+# deploy/ui/server.py (the monitoring UI)
+aiohttp>=3.9
 # replay_eval.py only (reads recorded episodes, draws plots)
 h5py==3.14.0
 matplotlib>=3.9

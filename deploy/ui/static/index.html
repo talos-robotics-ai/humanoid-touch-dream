@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HTD Deploy Monitor</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <h1>HTD deploy supervisor</h1>
+  <span id="conn" class="conn off">connecting</span>
+</header>
+
+<main>
+  <section class="card" id="state-card" aria-label="State machine">
+    <div class="strip">
+      <div class="chain">
+        <span class="st" data-state="BOOT">BOOT</span><span class="arrow">&rarr;</span>
+        <span class="st" data-state="STABILIZING">STABILIZING</span><span class="arrow">&rarr;</span>
+        <span class="st" data-state="READY">READY</span><span class="arrow">&rarr;</span>
+        <span class="st" data-state="RUNNING">RUNNING</span>
+      </div>
+      <div class="chain side">
+        <span class="st" data-state="HOLD">HOLD</span>
+        <span class="st" data-state="MANUAL">MANUAL</span>
+        <span class="st" data-state="ESTOP">ESTOP</span>
+      </div>
+    </div>
+    <div class="state-line">
+      <span id="since" class="mono"></span>
+      <span id="reason"></span>
+      <span id="fault" class="fault"></span>
+    </div>
+    <ul id="conditions" class="conditions"></ul>
+    <ul id="gating" class="gating"></ul>
+    <div class="controls">
+      <button id="btn-start" class="primary" disabled>Start</button>
+      <button id="btn-stop" class="danger">Stop</button>
+      <button id="btn-rearm">Re-arm</button>
+      <button id="btn-reset">Reset</button>
+      <span id="walk" class="flag">walk: ?</span>
+      <span id="manual-walk" class="flag">manual walk: ?</span>
+    </div>
+  </section>
+
+  <div class="row">
+    <section class="card" aria-label="Robot">
+      <h2>Robot</h2>
+      <dl class="kv" id="robot-kv"></dl>
+      <div class="sticks">
+        <figure><canvas id="stick-left" width="72" height="72"></canvas><figcaption>left stick</figcaption></figure>
+        <figure><canvas id="stick-right" width="72" height="72"></canvas><figcaption>right stick</figcaption></figure>
+        <div><div class="label">buttons</div><div id="buttons" class="mono">none</div></div>
+      </div>
+      <h3>Input ages</h3>
+      <ul id="ages" class="ages mono"></ul>
+    </section>
+
+    <section class="card" aria-label="Camera">
+      <h2>Camera <span id="camera-info" class="muted mono"></span></h2>
+      <div class="camera"><img id="camera" alt="latest policy camera frame"></div>
+    </section>
+  </div>
+
+  <section class="card" aria-label="Measured and predicted">
+    <h2>What happens next <span class="muted">measured (solid) &middot; latest prediction (dashed) &middot; | switch to next chunk</span></h2>
+    <div id="plots" class="plots"></div>
+  </section>
+
+  <section class="card" aria-label="Log">
+    <h2>Log <input id="log-filter" type="search" placeholder="filter" aria-label="filter log"></h2>
+    <ol id="log" class="log mono"></ol>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
