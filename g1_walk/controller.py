@@ -561,6 +561,7 @@ class Controller:
             self._end_session_freeze(d.reason)
         elif action == "stand":
             self._lift_link_fault()
+            self.standing_check.reset()     # READY needs a fresh standing hold after a stop
             s.stand()
         elif action == "engage_manual":
             self._manual_engaged = self.walker.engage()
@@ -578,6 +579,7 @@ class Controller:
             s.set_walk_command(vx, wz)
         elif action == "reset":
             self._lift_link_fault()
+            self.standing_check.reset()
             self._start_reset()     # no session here: a RUNNING one was frozen first
             if self._home_glide is None and self.resetting:
                 # The glide home was refused (a fault is still asserted): a reset

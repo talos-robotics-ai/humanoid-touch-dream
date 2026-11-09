@@ -12,10 +12,10 @@
 #   2. Latency, in READY: 20 s with no WebSocket client (status_probe.py, straight from
 #      DDS), then 20 s through the UI (ws_probe.py): the controller's tick_max_ms < 10 in
 #      both, |tick_p50 with - without| < 1 ms, tick_max with - without < 2 ms, rollout's
-#      loop_max_ms < 16 in both; then RUNNING with the UI connected: tick_p50 within 2 ms
-#      of a reference run's (--running_ref_ms, default 36; RUNNING ticks carry today's IK
-#      solve). A RUNNING window with no client, before check 3, is recorded as this run's
-#      own reference (reported, not gating).
+#      loop_max_ms < 16 in both; then RUNNING (whose ticks carry today's IK solve) 10 s
+#      with no client and 10 s with the UI connected, in the same run: tick_p50 with the
+#      UI within 2 ms of tick_p50 without (--running_ref_ms MS compares against MS
+#      instead, e.g. another run's p50).
 #   3. deploy/ui/cmd.py start / stop / rearm / reset give the expected supervisor log lines
 #      in time.
 #   4. Teardown: every process stopped in time, nothing left, no rt/lowcmd writer left.
@@ -29,7 +29,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 MOD="$REPO/g1_walk"
 PY="python"
 MODEL=""
-REF_RUNNING_P50_MS=36.0     # RUNNING tick_p50 of the implementer's reference run, ms
+REF_RUNNING_P50_MS=""        # empty: the same run's RUNNING window with no client is the reference
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --model_path) MODEL="$2"; shift 2 ;;
@@ -176,10 +176,10 @@ if [[ $C1 == PASS ]]; then
     "$PY" "$HERE/ws_probe.py" --port "$PORT" --seconds "$WINDOW_S" --out "$LOG/ready_with_ui.json"
 fi
 
-# -- a RUNNING window without the UI (an in-run reference for check 2, not gating) -------------
+# -- check 2's RUNNING window with no WebSocket client (the reference) -------------------------
 declare -A CT=()
 if [[ $C1 == PASS ]]; then
-    say "RUNNING ${RUN_S} s with no WebSocket client (DDS reader; reference only)"
+    say "RUNNING ${RUN_S} s with no WebSocket client (DDS reader)"
     "$PY" "$HERE/status_probe.py" --iface lo --seconds $((RUN_S + 1)) --out "$LOG/running_without_ui.json" \
         > "$LOG/running_ref_probe.log" 2>&1 &
     PROBE_PID=$!
@@ -281,25 +281,32 @@ r = {"tick_p50_ms": field(running, "RUNNING", "tick_p50_ms", "p50"),
      "tick_max_ms": field(running, "RUNNING", "tick_max_ms", "max"),
      "loop_max_ms": field(running, "RUNNING", "policy.loop_max_ms", "max"),
      "n_supervisor": field(running, "RUNNING", "tick_p50_ms", "n"),
-     "states": running["states"] if running else None, "reference_p50_ms": $REF_RUNNING_P50_MS}
+     "states": running["states"] if running else None}
 lat["running_with_ui"] = r
-lat["running_without_ui_reference"] = {   # same run, no WebSocket client: informational, not gating
+lat["running_without_ui"] = {            # same run, no WebSocket client
     "tick_p50_ms": field(running_ref, "RUNNING", "tick_p50_ms", "p50"),
     "tick_max_ms": field(running_ref, "RUNNING", "tick_max_ms", "max"),
     "loop_max_ms": field(running_ref, "RUNNING", "policy.loop_max_ms", "max"),
     "n_supervisor": field(running_ref, "RUNNING", "tick_p50_ms", "n"),
     "states": running_ref["states"] if running_ref else None}
-if r["tick_p50_ms"] is None: why.append("no settled RUNNING samples")
-elif not abs(r["tick_p50_ms"] - $REF_RUNNING_P50_MS) < 2:
-    why.append(f"RUNNING tick_p50 {r['tick_p50_ms']:.2f} not within 2 ms of $REF_RUNNING_P50_MS")
+rr = lat["running_without_ui"]
+override = "$REF_RUNNING_P50_MS"
+ref, ref_src = ((float(override), "--running_ref_ms") if override else
+                (rr["tick_p50_ms"], "RUNNING without UI, same run"))
+lat["running_reference"] = {"tick_p50_ms": ref, "source": ref_src}
+if r["tick_p50_ms"] is None: why.append("no settled RUNNING samples with the UI")
+elif ref is None: why.append("no settled RUNNING samples without the UI")
+else:
+    lat["d_running_tick_p50_ms"] = r["tick_p50_ms"] - ref
+    if not abs(lat["d_running_tick_p50_ms"]) < 2:
+        why.append(f"RUNNING tick_p50 {r['tick_p50_ms']:.2f} not within 2 ms of {ref:.2f} ({ref_src})")
 if why: c2 = "FAIL"
 fmt = lambda x: "n/a" if x is None else f"{x:.2f}"
 print(f"[sim_supervisor] READY without UI: tick p50 {fmt(a.get('tick_p50_ms'))} max {fmt(a.get('tick_max_ms'))} ms, "
       f"loop max {fmt(a.get('loop_max_ms'))} ms; with UI: tick p50 {fmt(b.get('tick_p50_ms'))} max "
       f"{fmt(b.get('tick_max_ms'))} ms, loop max {fmt(b.get('loop_max_ms'))} ms; RUNNING with UI: tick p50 "
       f"{fmt(r['tick_p50_ms'])} max {fmt(r['tick_max_ms'])} ms, loop max {fmt(r['loop_max_ms'])} ms")
-rr = lat["running_without_ui_reference"]
-print(f"[sim_supervisor] RUNNING without UI (this run, reference only): tick p50 {fmt(rr['tick_p50_ms'])} "
+print(f"[sim_supervisor] RUNNING without UI: tick p50 {fmt(rr['tick_p50_ms'])} "
       f"max {fmt(rr['tick_max_ms'])} ms, loop max {fmt(rr['loop_max_ms'])} ms")
 print(f"[sim_supervisor] check 2: latency: {c2}" + (" (" + "; ".join(why) + ")" if why else ""))
 checks = {"1_ready_to_deploy": "$C1", "2_latency": c2, "3_commands": "$C3", "4_teardown": "$C4"}

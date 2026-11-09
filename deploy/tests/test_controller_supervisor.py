@@ -263,3 +263,31 @@ def test_refused_engage_goes_to_hold(rig):
     assert not rig.c.session
     rig.tick()
     assert rig.state is State.HOLD
+
+
+def test_rearm_restarts_the_standing_hold(rig):
+    rig.to_running()
+    rig.tick(100)                       # 2 s of standing already held in RUNNING
+    rig.c._kb_cmds.append("stop")
+    rig.tick()
+    assert rig.state is State.HOLD
+    rig.c._kb_cmds.append("rearm")
+    rig.tick()
+    assert rig.state is State.STABILIZING
+    rig.tick(94)                        # 1.9 s after the re-arm, standing good throughout
+    assert rig.state is State.STABILIZING
+    rig.tick(16)                        # 2.22 s
+    assert rig.state is State.READY
+
+
+def test_reset_restarts_the_standing_hold(rig):
+    rig.to_ready()
+    rig.tick(100)
+    rig.c.rehome_s = 0.5                # a glide home shorter than the hold
+    rig.c._kb_cmds.append("reset")
+    rig.tick()
+    assert rig.state is State.STABILIZING
+    rig.tick(94)                        # glide done at 0.5 s; 1.9 s of the hold
+    assert rig.state is State.STABILIZING and not rig.c.resetting
+    rig.tick(16)
+    assert rig.state is State.READY
