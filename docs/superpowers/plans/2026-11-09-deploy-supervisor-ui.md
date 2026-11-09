@@ -349,9 +349,9 @@ Transition table (from the spec; `start`/`stop`/`rearm`/`reset` are true when th
 | --- | --- | --- | --- |
 | any but ESTOP | ESTOP | `classify_fault(fault) == "estop"` | `("freeze",)` |
 | BOOT | STABILIZING | `walker_live` | `()` |
-| STABILIZING, READY, HOLD, RUNNING | MANUAL | `remote.deflected` | RUNNING: `("freeze", "engage_manual")`; others: `("engage_manual",)` |
-| STABILIZING | READY | `standing.standing and policy_ready and frame_fresh` | `("log_ready",)` |
-| READY | STABILIZING | not (`standing.standing and policy_ready and frame_fresh`) | `()`; reason names what was lost |
+| STABILIZING, READY, HOLD, RUNNING | MANUAL | `remote.deflected and not lowstate_stale and classify_fault(fault) != "link"` | RUNNING: `("freeze", "engage_manual")`; others: `("engage_manual",)` |
+| STABILIZING | READY | `standing.standing and policy_ready and frame_fresh and fault is None` | `("log_ready",)` |
+| READY | STABILIZING | not (`standing.standing and policy_ready and frame_fresh and fault is None`) | `()`; reason names what was lost (`"fault: <reason>"` for a fault) |
 | READY | RUNNING | `start` | `("start_session",)` |
 | RUNNING | HOLD | `stop`, or `not frame_fresh`, or `classify_fault(fault) == "link"` | `("freeze",)` |
 | MANUAL | HOLD | `not remote.deflected` for `release_s` (clock in the supervisor), or `lowstate_stale`, or `classify_fault(fault) == "link"` | `("freeze",)` |

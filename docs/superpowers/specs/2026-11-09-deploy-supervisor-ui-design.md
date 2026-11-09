@@ -143,12 +143,12 @@ goes on `sys.path` the way `g1_walk/paths.py` already does for other directories
 | From | To | On |
 | --- | --- | --- |
 | BOOT | STABILIZING | walker handover completed (`walker.live`) |
-| STABILIZING | READY | `standing` has been true for `standing_hold_s` (default 2.0 s) **and** `policy_ready` **and** a fresh policy frame arrived within `policy_timeout` |
-| READY | STABILIZING | standing lost, or policy frames stop, or policy status not ready; the log says which |
+| STABILIZING | READY | `standing` has been true for `standing_hold_s` (default 2.0 s) **and** `policy_ready` **and** a fresh policy frame arrived within `policy_timeout` **and** no fault is asserted |
+| READY | STABILIZING | standing lost, or policy frames stop, or policy status not ready, or a fault appears; the log says which |
 | READY | RUNNING | **start**: remote `Start` button, or UI start command |
 | RUNNING | HOLD | **stop**: remote `X` button, or UI stop; or no fresh frame for `policy_timeout` (0.5 s, as today); or the policy's status says it exited; or the arm jump guard has refused commands for `ARM_HOLD_MAX` frames |
-| RUNNING | MANUAL | any stick deflection beyond the deadband |
-| READY, HOLD, STABILIZING | MANUAL | any stick deflection beyond the deadband |
+| RUNNING | MANUAL | any stick deflection beyond the deadband, while the low-state is fresh and no link fault is asserted (otherwise the next row applies) |
+| READY, HOLD, STABILIZING | MANUAL | any stick deflection beyond the deadband, while the low-state is fresh and no link fault is asserted |
 | MANUAL | HOLD | sticks back inside the deadband for `manual_release_s` (1.0 s), or the robot's low-state older than 0.1 s (the remote snapshot is then unknown: walk goes to zero first). The policy does **not** resume |
 | HOLD | STABILIZING | **re-arm**: remote `L1 + Start` held for 1 s, or UI "Re-arm" (confirmed). The torso is slewed back to nominal (the walker's `stand()`), the arms and hands stay where they are; READY is reached again only through the standing and readiness checks, and the policy restarts from a fresh chunk |
 | HOLD, READY, STABILIZING, RUNNING | STABILIZING | **reset**: remote `Y`, UI "Reset" (confirmed), or rollout's `ResetCommand` (its key 1): today's reset, arms glide home, hands open, torso nominal. In RUNNING it stops first (HOLD) and then resets |
