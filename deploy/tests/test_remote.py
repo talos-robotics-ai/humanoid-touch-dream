@@ -130,3 +130,9 @@ def test_stick_mapping_clips_beyond_unit():
 def test_hand_built_nan_snapshot_is_not_deflected():
     e = RemoteInput(SPEC).update(RemoteSnapshot(0.0, float("nan"), 0.9, 0.0, frozenset(), False), 0.0)
     assert e.deflected is False and (e.manual_vx, e.manual_wz) == (0.0, 0.0)
+
+def test_stop_held_through_stale_tick_still_fires():
+    r = RemoteInput(SPEC)
+    r.update(stale(), 0.0)
+    assert not r.update(snap((KeyMap.X,)), 0.10).stop
+    assert r.update(snap((KeyMap.X,)), 0.16).stop

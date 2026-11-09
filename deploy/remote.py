@@ -79,8 +79,9 @@ class RemoteInput:
         for b in snap.buttons:
             self._down_since.setdefault(b, now)
         if self._latch and not snap.stale:
-            # Link just recovered: a button still held is not a new press.
-            self._fired.update(snap.buttons)
+            # Link just recovered: a held button is not a new press. Stop is left
+            # out: a late or repeated stop is harmless, a swallowed one is not.
+            self._fired.update(snap.buttons - {s.button_stop})
             self._rearm_fired = (s.button_rearm_modifier in snap.buttons
                                  and s.button_start in snap.buttons)
             self._latch = False
