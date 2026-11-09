@@ -38,14 +38,16 @@ class TickTimer:
 class UiCommandFilter:
     def __init__(self, max_age_s: float):
         self.max_age_s = float(max_age_s)
-        self._seen: set = set()
+        self._seen: dict = {}       # nonce -> command timestamp
 
     def accept(self, cmd: UiCommand, now_wall: float) -> str | None:
+        # A nonce is forgotten once its command is too old to pass the age check anyway.
+        self._seen = {n: t for n, t in self._seen.items() if now_wall - t <= self.max_age_s}
         if cmd.command not in UI_COMMANDS or not now_wall - cmd.timestamp <= self.max_age_s:
             return None
         if cmd.nonce in self._seen:
             return None
-        self._seen.add(cmd.nonce)
+        self._seen[cmd.nonce] = float(cmd.timestamp)
         return cmd.command
 
 

@@ -18,10 +18,15 @@ class State(str, Enum):
 
 
 def classify_fault(reason: str | None) -> str | None:
-    """None, "estop" (latched) or "link" (recoverable). Unknown strings fail closed to "link"."""
+    """None, "estop" (latched) or "link" (recoverable). Unknown strings fail closed to "link".
+
+    A silent walker (`lower_jetson_silent_<age>s`, derived from the link's age) clears when its
+    status returns, so it is a link fault; an `estop_*` is latched in the body whatever its reason."""
     if reason is None:
         return None
-    if reason.startswith(("estop_", "lower_")) or reason in ("damp", "damped"):
+    if reason.startswith("estop_") or reason in ("damp", "damped"):
+        return "estop"
+    if reason.startswith("lower_") and "silent" not in reason:
         return "estop"
     return "link"
 

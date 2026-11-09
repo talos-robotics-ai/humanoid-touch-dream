@@ -208,3 +208,12 @@ def test_first_ready_log_line_is_exact():
     sup.step(inputs(), 0.0)
     d = sup.step(inputs(), 0.1)
     assert d.log[0] == "[supervisor] STABILIZING -> READY: standing 2.0 s, policy ready, frames fresh"
+
+def test_a_silent_walker_is_a_link_fault_not_an_estop():
+    # RemoteLower reports lower_jetson_silent_<age>s once the walker's status is 1 s old; it clears
+    # when the status returns, so it must hold (re-arm clears it), not latch ESTOP.
+    assert classify_fault("lower_jetson_silent_1.2s") == "link" and classify_fault("link_jetson_silent") == "link"
+    assert classify_fault("lower_tilt") == "estop" and classify_fault("estop_jetson_silent") == "estop"
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_ready(sup)
+    sup.step(inputs(ui=("start",)), 1.0)
+    assert sup.step(inputs(fault="lower_jetson_silent_1.2s"), 2.0).state is State.HOLD

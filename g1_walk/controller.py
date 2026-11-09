@@ -61,7 +61,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.dirname(HERE))
+sys.path.append(os.path.dirname(HERE))
 import paths  # noqa: E402
 from commands import (TORSO_ATTITUDE_MODES, WalkGate, parse_teleop_data,  # noqa: E402
                       torso_command, walk_command)
@@ -190,7 +190,7 @@ class Controller:
         self._arms_home = False
         self._last_arm_cmd = None
         self._said = set()
-        self._stop_request = False      # becomes a supervisor stop on the next tick
+        self._stop_request = None       # why; becomes a supervisor stop on the next tick
 
         # Everything slow to build comes before the walker link: once linked,
         # this process must answer the walker every 0.25 s or it stands itself.
@@ -204,7 +204,7 @@ class Controller:
         def on_arms_refused(label):
             logger.critical("[g1_walk] the %s have refused every command for %d frames"
                             % (label, ARM_HOLD_MAX))
-            self._stop_request = True
+            self._stop_request = "the %s refused every command for %d frames" % (label, ARM_HOLD_MAX)
         guard = JointJumpGuard(
             arm_jump_thresholds(psi_float("PSI_G1_ARM_JUMP_SCALE", "1.0")), "g1_walk", "arms",
             max_hold_steps=ARM_HOLD_MAX, on_expire=on_arms_refused)
@@ -239,23 +239,26 @@ class Controller:
         self.sup = None
         if args.supervisor == "on":
             from teleop.robot_control.robot_body import LowStateStale
-            self._lowstate_stale = LowStateStale
-            self.sup = Supervisor(G1_SPEC.supervisor, time.monotonic())
-            self.standing_check = StandingCheck(G1_SPEC.standing)
-            self.remote_in = remote.RemoteInput(G1_SPEC.remote)
-            self.ui_filter = UiCommandFilter(G1_SPEC.supervisor.ui_command_max_age)
-            self.ticks = TickTimer()
-            self._ui_cmds = []              # under self._frame_lock, as the next two
-            self._kb_cmds = []
-            self._torso_pose = None         # (pose, monotonic time), from _publish_state_loop
-            self._policy_status = None
-            self._last_log = ""
-            self._sup_view = None           # the last tick's decision and inputs, for the status
-            self._awaiting_fresh = False    # RUNNING until a frame newer than the start arrives
-            self._manual_engaged = False
+            self._init_supervisor(LowStateStale)
             self.reader_ui = dds.reader(self.dds, TOPIC_UI_COMMAND, UiCommand)
             self.reader_policy = dds.reader(self.dds, TOPIC_POLICY_STATUS, PolicyStatus)
             self.writer_sup = dds.writer(self.dds, TOPIC_SUPERVISOR, SupervisorStatus)
+
+    def _init_supervisor(self, lowstate_stale):
+        self._lowstate_stale = lowstate_stale
+        self.sup = Supervisor(G1_SPEC.supervisor, time.monotonic())
+        self.standing_check = StandingCheck(G1_SPEC.standing)
+        self.remote_in = remote.RemoteInput(G1_SPEC.remote)
+        self.ui_filter = UiCommandFilter(G1_SPEC.supervisor.ui_command_max_age)
+        self.ticks = TickTimer()
+        self._ui_cmds = []              # under self._frame_lock, as the next two
+        self._kb_cmds = []
+        self._torso_pose = None         # (pose, monotonic time), from _publish_state_loop
+        self._policy_status = None
+        self._last_log = ""
+        self._sup_view = None           # the last tick's decision and inputs, for the status
+        self._awaiting_fresh = False    # RUNNING until a frame newer than the start arrives
+        self._manual_engaged = False
 
     # -- latches ---------------------------------------------------------------
     def estop(self, reason="operator"):
@@ -441,7 +444,10 @@ class Controller:
         pipeline's session boundary."""
         if not self.walker.engage():
             self.operator_hold = True
-            self.log.critical("[g1_walk] session refused; s/g at the keyboard tries again")
+            if self.sup is not None:
+                self.log.critical("[g1_walk] engage refused; re-arm to try again")
+            else:
+                self.log.critical("[g1_walk] session refused; s/g at the keyboard tries again")
             return
         self.body.arm_link_watchdog()
         q_from = self._last_arm_cmd if self._last_arm_cmd is not None \
@@ -510,8 +516,9 @@ class Controller:
         if self._reset_pending.is_set():
             self._reset_pending.clear()
             kb.append("reset")
-        if self._stop_request:
-            self._stop_request = False
+        if self._stop_request is not None:
+            self.log.warning("[supervisor] stop: %s" % self._stop_request)
+            self._stop_request = None
             kb.append("stop")
         frame = self._fresh_frame(now)
         # As _may_start: no frame counts while the arms glide home.
@@ -552,11 +559,7 @@ class Controller:
         elif action == "freeze":
             self._end_session_freeze(d.reason)
         elif action == "stand":
-            if classify_fault(self.fault()) == "link":
-                # Lifted as a session start lifts it, and not policed until
-                # the next session or MANUAL arms it again.
-                self.body.arm_link_watchdog()
-                self.body.disarm_link_watchdog()
+            self._lift_link_fault()
             s.stand()
         elif action == "engage_manual":
             self._manual_engaged = self.walker.engage()
@@ -573,7 +576,21 @@ class Controller:
                 wz = float(np.clip(events.manual_wz, *s.wz_range))
             s.set_walk_command(vx, wz)
         elif action == "reset":
+            self._lift_link_fault()
             self._start_reset()     # no session here: a RUNNING one was frozen first
+            if self._home_glide is None and self.resetting:
+                # The glide home was refused (a fault is still asserted): a reset
+                # that never completes would keep the frames stale for good.
+                self.resetting = False
+                self.log.warning("[g1_walk] reset: the arms cannot glide home (%s); they hold"
+                                 % self.fault())
+
+    def _lift_link_fault(self):
+        """A link fault is lifted as a session start lifts it, and the link is
+        not policed again until the next session or MANUAL arms it."""
+        if classify_fault(self.fault()) == "link":
+            self.body.arm_link_watchdog()
+            self.body.disarm_link_watchdog()
 
     def _begin_running(self, now):
         """The first fresh frame in RUNNING: today's session start. A glide
@@ -583,7 +600,7 @@ class Controller:
         self.resetting = False
         self._start_session(now)
         if not self.session:
-            self._stop_request = True
+            self._stop_request = "the walker refused to engage"
 
     def _end_session_freeze(self, why):
         """``_end_session(why, glide_home=False)`` without the walker's

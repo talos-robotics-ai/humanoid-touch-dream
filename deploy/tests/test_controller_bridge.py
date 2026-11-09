@@ -52,3 +52,11 @@ def test_status_message_carries_state_flags_remote_and_timing():
     assert (m.stick_lx, m.stick_ly, m.stick_rx, m.stick_ry) == (0.0, 0.5, -0.4, 0.0)
     assert list(m.buttons) == ["L1", "start"] and (m.manual_vx, m.manual_wz) == (0.12, -0.2)
     assert (m.tick_p50_ms, m.tick_max_ms) == (2.5, 7.0) and m.log_line.startswith("[supervisor] BOOT")
+
+def test_ui_command_nonces_expire_with_their_commands():
+    f = UiCommandFilter(max_age_s=0.5)
+    for i in range(100):
+        assert f.accept(UiCommand(timestamp=100.0 + i, nonce=i, command="stop", source="ui"), 100.0 + i) == "stop"
+    assert len(f._seen) <= 1                                  # only nonces still young enough to replay
+    assert f.accept(UiCommand(timestamp=199.0, nonce=99, command="stop", source="ui"), 199.3) is None   # still remembered
+    assert f.accept(UiCommand(timestamp=199.0, nonce=99, command="stop", source="ui"), 199.6) is None   # expired, and too old
