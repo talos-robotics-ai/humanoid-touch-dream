@@ -61,6 +61,32 @@ def get_sinusoid_encoding_table(n_position, d_hid):
     return torch.FloatTensor(angles).unsqueeze(0) # 1, n_position, d_hidden
 
 
+_SINUSOID_DEVICE_TABLES = {}
+_DEVICE_SCALARS = {}
+
+
+def _scalar_on(value, device):
+    """A float32 scalar tensor on `device`, created once. Do not modify in place."""
+    key = (float(value), torch.device(device))
+    t = _DEVICE_SCALARS.get(key)
+    if t is None:
+        t = torch.tensor(float(value), dtype=torch.float32, device=device)
+        _DEVICE_SCALARS[key] = t
+    return t
+
+
+def sinusoid_table_on(n_position, d_hid, device):
+    """get_sinusoid_encoding_table kept on `device`: the forward pass reuses it instead of
+    copying it from the CPU on every call (and it stays valid inside a captured CUDA graph).
+    Callers must not modify the returned tensor in place."""
+    key = (n_position, d_hid, torch.device(device))
+    table = _SINUSOID_DEVICE_TABLES.get(key)
+    if table is None:
+        table = get_sinusoid_encoding_table(n_position, d_hid).to(device)
+        _SINUSOID_DEVICE_TABLES[key] = table
+    return table
+
+
 class CrossTransformer(nn.Module):
     ''' The cross transformer model, drawing from HPT and CrossFormer'''
     def __init__(
@@ -248,12 +274,15 @@ class CrossTransformer(nn.Module):
                 dummy_tokens = torch.zeros(bs,
                                            self.tokenizers[embodiment][modality].token_num,
                                            self.tokenizers[embodiment][modality].hidden_dim).to(x[list(x.keys())[0]].device)
-                dummy_mask = torch.zeros(bs, self.tokenizers[embodiment][modality].token_num).to(x[list(x.keys())[0]].device)
+                dummy_mask = torch.zeros(bs, self.tokenizers[embodiment][modality].token_num, device=x[list(x.keys())[0]].device)
                 out.append(dummy_tokens)
                 out_mask.append(dummy_mask)
                 continue
             
-            if not torch.any(x_mask[modality]):
+            # masks_known_present: the caller checked on the CPU that every mask is all True, so
+            # skip this GPU->CPU read (one sync per modality; it also blocks CUDA graph capture).
+            present = getattr(self, 'masks_known_present', False) or bool(torch.any(x_mask[modality]))
+            if not present:
                 input_data = None
                 output_tokens, output_mask = self.tokenizers[embodiment][modality].compute_latent(input_data, x_mask[modality])
                 out.append(output_tokens)
@@ -269,7 +298,7 @@ class CrossTransformer(nn.Module):
                 data_horizon = data_shape[1]
                 horizon = data_horizon
                 
-                pos_embd = get_sinusoid_encoding_table(horizon * int(np.prod(data_shape[2:-1])), data_shape[-1]).to(features.device)
+                pos_embd = sinusoid_table_on(horizon * int(np.prod(data_shape[2:-1])), data_shape[-1], features.device)
                 pos_embd = einops.repeat(pos_embd, 'one n d -> b one n d', b=data_shape[0])
                 features = features + pos_embd.view(data_shape)
                 output_tokens, output_mask = self.tokenizers[embodiment][modality].compute_latent(features, x_mask[modality])
@@ -286,8 +315,9 @@ class CrossTransformer(nn.Module):
             image_bytes = 'image' in modality and x[modality].dtype == torch.uint8
             x[modality] = x[modality].to(torch.float32)
             if image_bytes:
-                # A tensor divisor preserves the CPU FP32 normalization on CUDA.
-                x[modality].div_(x[modality].new_tensor(255.0))
+                # A tensor divisor preserves the CPU FP32 normalization on CUDA. It is cached on
+                # the device: creating it per call is a host-to-device copy (and breaks CUDA graphs).
+                x[modality].div_(_scalar_on(255.0, x[modality].device))
         x = self.preprocess_states(x, embodiment)
         feature_tokens, feature_mask = self.tokenize(x, embodiment, x_mask)
         feature_tokens = self.preprocess_tokens(feature_tokens, embodiment) # added pos_embd
@@ -470,7 +500,7 @@ class CrossTransformer(nn.Module):
         Get the positional embedding for the tokens
         """
         token_len = tokens.shape[1]
-        pos_embd = get_sinusoid_encoding_table(token_len, tokens.shape[-1]).to(tokens.device)
+        pos_embd = sinusoid_table_on(token_len, tokens.shape[-1], tokens.device)
         return pos_embd
     
     def partition_trunk_tokens(self, tokens, embodiment:str):

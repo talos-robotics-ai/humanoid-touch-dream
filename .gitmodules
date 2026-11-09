@@ -2,3 +2,6 @@
 	path = htd_wbc/isaaclab_decoupled_wbc
 	url = https://github.com/chrisyrniu/IsaacLab-Decoupled-WBC.git
 	branch = main
+[submodule "g1_walk/teleop-cbf-perception"]
+	path = g1_walk/teleop-cbf-perception
+	url = https://github.com/talos-robotics-ai/teleop-cbf-perception

@@ -1,0 +1,25 @@
+# Installed by setup.sh on top of the base environment: the teleop conda env at the
+# pinned commit (g1_walk/teleop-cbf-perception/environment.yml), which already provides
+# torch 2.12+cu130, numpy 2.2.6, scipy 1.15.2, casadi 3.7.2, pinocchio 4.0.0, mujoco 3.9.0,
+# cyclonedds 0.10.2, pyzmq 27.1.0 and unitree_sdk2py (pinned, cf26ccef). Versions below
+# were verified on the operator laptop (Python 3.10, RTX 5070 Laptop GPU). setup.sh also
+# installs --no-deps: dex_retargeting (robot_control/dex-retargeting) and inspire_sdkpy
+# (the Inspire SDK at INSPIRE_SDK_COMMIT in pins.env).
+
+# HTD robot_control: arm IK, state estimator, hand retargeting (robot_control/requirements.txt)
+logging-mp==0.1.6
+meshcat==0.3.2
+# dex_retargeting's imports
+pytransform3d==3.15.0
+nlopt==2.10.0
+trimesh==4.12.2
+anytree==2.13.0
+lxml==6.1.1
+PyYAML==6.0.3
+# inspire_sdkpy's package import (its __init__ loads the Modbus client and the Qt viewer);
+# policy_rollout imports it for the touch topics as well
+pymodbus==3.6.9
+pyserial==3.5
+PyQt5==5.15.11
+pyqtgraph==0.13.7
+colorcet==3.1.0

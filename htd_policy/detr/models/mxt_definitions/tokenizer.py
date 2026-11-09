@@ -133,14 +133,14 @@ class ImageTokenizer(BaseTokenizer):
         # Initial reshape to adapt to token dimensions
         bs = mask.shape[0]
         if feat is None:
-            output_tokens = torch.zeros((bs, self.token_num, self.hidden_dim)).to(self.device)
-            trunk_mask = torch.zeros((bs, self.token_num)).to(self.device)
+            output_tokens = torch.zeros((bs, self.token_num, self.hidden_dim), device=self.device)
+            trunk_mask = torch.zeros((bs, self.token_num), device=self.device)
         else:
             features = feat.reshape(bs, -1, feat.shape[-1])  # (bs, seq, out_dim)
             # Replicating tokens for each item in the batch and computing cross-attention
             query_tokens = self._get_query_tokens(bs)  # (bs, num_tokens, d_model)
             output_tokens = self.cross_attn(query_tokens, features)  # (bs, num_tokens, d_model)
-            trunk_mask = torch.ones((feat.shape[0], self.token_num)).to(self.device)
+            trunk_mask = torch.ones((feat.shape[0], self.token_num), device=self.device)
         return output_tokens, trunk_mask
 
 
@@ -192,14 +192,14 @@ class ProprioTokenizer(BaseTokenizer):
         # Initial reshape to adapt to token dimensions
         bs = mask.shape[0]
         if feat is None:
-            output_tokens = torch.zeros((bs, self.token_num, self.hidden_dim)).to(self.device)
-            trunk_mask = torch.zeros((bs, self.token_num)).to(self.device)
+            output_tokens = torch.zeros((bs, self.token_num, self.hidden_dim), device=self.device)
+            trunk_mask = torch.zeros((bs, self.token_num), device=self.device)
         else:
             features = feat.reshape(bs, -1, feat.shape[-1])  # (bs, 1, d_model)
             # Replicating tokens for each item in the batch and computing cross-attention
             query_tokens = self._get_query_tokens(bs)  # (bs, num_tokens, d_model)
             output_tokens = self.cross_attn(query_tokens, features)  # (bs, num_tokens, d_model)
-            trunk_mask = torch.ones((feat.shape[0], self.token_num)).to(self.device)
+            trunk_mask = torch.ones((feat.shape[0], self.token_num), device=self.device)
         return output_tokens, trunk_mask
 
 
@@ -319,14 +319,14 @@ class FingerTactileTokenizer(BaseTokenizer):
     def compute_latent(self, feat, mask):
         bs = mask.shape[0]
         if feat is None:
-            output_tokens = torch.zeros((bs, self.token_num, self.hidden_dim)).to(self.device)
-            trunk_mask = torch.zeros((bs, self.token_num)).to(self.device)
+            output_tokens = torch.zeros((bs, self.token_num, self.hidden_dim), device=self.device)
+            trunk_mask = torch.zeros((bs, self.token_num), device=self.device)
         else:
             feat = self.feat_to_token(feat)
             features = feat.reshape(bs, -1, feat.shape[-1])
             query_tokens = self._get_query_tokens(bs)
             output_tokens = self.cross_attn(query_tokens, features)
-            trunk_mask = torch.ones((feat.shape[0], self.token_num)).to(self.device)
+            trunk_mask = torch.ones((feat.shape[0], self.token_num), device=self.device)
         return output_tokens, trunk_mask
 
 TACTILE_PATCHES: List[Tuple[str, int, int, int]] = [
@@ -459,12 +459,12 @@ class HandTactileTokenizer(BaseTokenizer):
     def compute_latent(self, feat, mask):
         bs = mask.shape[0]
         if feat is None:
-            output_tokens = torch.zeros((bs, self.token_num, self.hidden_dim)).to(self.device)
-            trunk_mask = torch.zeros((bs, self.token_num)).to(self.device)
+            output_tokens = torch.zeros((bs, self.token_num, self.hidden_dim), device=self.device)
+            trunk_mask = torch.zeros((bs, self.token_num), device=self.device)
         else:
             feat = self.feat_to_token(feat)
             features = feat.reshape(bs, -1, feat.shape[-1])
             query_tokens = self._get_query_tokens(bs)
             output_tokens = self.cross_attn(query_tokens, features)
-            trunk_mask = torch.ones((feat.shape[0], self.token_num)).to(self.device)
+            trunk_mask = torch.ones((feat.shape[0], self.token_num), device=self.device)
         return output_tokens, trunk_mask

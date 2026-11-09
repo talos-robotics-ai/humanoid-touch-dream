@@ -5,6 +5,11 @@ Run this controller and the matching Inspire hand driver alongside either the
 [policy rollout](../policy_rollout/README.md). Use one command source at a time.
 Policy training does not require this environment.
 
+For a policy trained on data recorded with the teleop stack's G1 walking
+policy, [g1_walk/](../g1_walk/README.md) replaces this controller and its hand
+driver: it runs that walking policy and drives the arms and hands from the same
+rollout messages. Never run both: each one commands the robot.
+
 ## Required hardware and assets
 
 Use a compatible G1 with Inspire DFTP Ethernet hands (the paper setup), or F1

@@ -1,0 +1,19 @@
+# Packages for running a trained policy on the robot-side PC (policy_rollout.py,
+# check_inference.py). Install PyTorch first, from the index matching your GPU
+# (setup_rollout_env.sh does this); training extras such as wandb are not needed.
+# Versions are the ones verified on the training server (L40S, torch 2.9.1+cu128)
+# and an RTX 5070 laptop (torch 2.12.0+cu130).
+numpy==2.2.6
+einops==0.8.2
+PyYAML==6.0.3
+tqdm==4.70.1
+packaging
+pillow>=10.4.0
+opencv-python>=4.10
+# robot links: DDS to the controller, the G1 head camera over ZMQ, rollout's keyboard
+cyclonedds==0.10.2
+pyzmq>=27.0
+pynput==1.8.2
+# replay_eval.py only (reads recorded episodes, draws plots)
+h5py==3.14.0
+matplotlib>=3.9

@@ -29,7 +29,15 @@ sys.path.insert(0, robot_control_dir)
 from teleop_dds_msgs import TeleopDataWB
 data_collect_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data_collect')
 sys.path.insert(0, data_collect_dir)
+import traceback
+
 from camera_utils import list_video_devices, find_device_path_by_name
+from chunk_schedule import G1_COMMAND_KINDS, ChunkScheduler
+from g1_command import (INSPIRE_TO_UNIFIED_EEF, UNIFIED_TO_UNITREE_EEF_ROT_REMAP, eef_link_to_hand_keypoints,
+                        rot_mat_to_rpy, rpy_to_rot_mat, teleop_targets)
+from inference_engine import FastInference, require_cuda
+from head_camera import add_head_camera_args, make_head_camera, resolve_head_camera_args
+from mxt_loading import checkpoint_path, load_mxt_policy, mxt_camera_size, mxt_inference_config
 
 # Tactile key -> (hand, start, end) for slicing full 1062-dim tactile
 _TACTILE_KEY_SLICE = {
@@ -68,32 +76,9 @@ _INSPIRE_F1_TOUCH_RAW_FIELDS = [
     'palm_right_normal_force', 'palm_right_tangential_force', 'palm_right_direction',
 ]
 
-def _mxt_inference_config(config):
-    """Ignore image activation checkpointing, which is only used in training."""
-    config = copy.deepcopy(config)
-    if isinstance(config, dict):
-        for embodiment in config.values():
-            if not isinstance(embodiment, dict):
-                continue
-            tokenizers = embodiment.get('tokenizer', {})
-            if isinstance(tokenizers, dict):
-                for name, tokenizer in tokenizers.items():
-                    if 'image' in name and isinstance(tokenizer, dict):
-                        tokenizer.pop('gradient_checkpoint', None)
-    return config
-
-
-def _mxt_camera_size(config, camera):
-    """Resolve saved (height, width) exactly as the MXT training loader does."""
-    size = []
-    for axis, fallback in (('height', 480), ('width', 640)):
-        value = config.get(f'{camera}_cam_{axis}')
-        if value is None:
-            value = config.get(axis, fallback)
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            raise ValueError(f'invalid saved {camera} camera {axis}: {value!r}')
-        size.append(value)
-    return tuple(size)
+# Moved to mxt_loading so replay_eval.py can share them; kept under the old names.
+_mxt_inference_config = mxt_inference_config
+_mxt_camera_size = mxt_camera_size
 
 
 def _hit_camera_sizes(config):
@@ -171,31 +156,14 @@ class HTDPolicyRollout:
         
         self.init_cameras()
 
-        self.unified_to_unitree_left_eef_rot_remap = np.array([
-            [1, 0, 0], [0, 0, -1], [0, 1, 0]
-        ], dtype=np.float64)
-        self.unified_to_unitree_right_eef_rot_remap = np.array([
-            [1, 0, 0], [0, 0, 1], [0, -1, 0]
-        ], dtype=np.float64)
+        self.unified_to_unitree_left_eef_rot_remap = UNIFIED_TO_UNITREE_EEF_ROT_REMAP['left']
+        self.unified_to_unitree_right_eef_rot_remap = UNIFIED_TO_UNITREE_EEF_ROT_REMAP['right']
         
         self.on_reset = False
         self.on_rollout = False
   
         inspire_hand_type = getattr(self.args, 'inspire_hand_type', 'dftp')
-        if inspire_hand_type == 'f1':
-            self.inspire_to_unified_eef = np.array([
-                [0, 0, 1, 0],
-                [0, 1, 0, 0],
-                [-1, 0, 0, 0],
-                [0, 0, 0, 1]
-            ], dtype=np.float64)
-        else:
-            self.inspire_to_unified_eef = np.array([
-                [0, -1, 0, 0],
-                [0, 0, -1, 0],
-                [1, 0, 0, 0],
-                [0, 0, 0, 1]
-            ], dtype=np.float64)
+        self.inspire_to_unified_eef = INSPIRE_TO_UNIFIED_EEF[inspire_hand_type]
 
         self.pause_commands = False
         
@@ -204,6 +172,8 @@ class HTDPolicyRollout:
         self.rollout_counter = 0
         self.infer_interval = self.args.inference_interval
         self.command_traj_dict = {}
+        self.init_chunk_schedule()
+        self.warmup_inference()
         
         # Set up network interface if specified
         if self.args.dds_interface is not None:
@@ -248,15 +218,13 @@ class HTDPolicyRollout:
         self.crop_size_h = 0
         self.head_frame_res = (self.head_view_resolution[0] - self.crop_size_h, self.head_view_resolution[1] - 2 * self.crop_size_w)
         self.head_color_frame = np.zeros((self.head_frame_res[0], 2 * self.head_frame_res[1], 3), dtype=np.uint8)
-        device_map = list_video_devices()
-        head_camera_name = "3D USB Camera"
-        device_path = find_device_path_by_name(device_map, head_camera_name)
-        print(f"Head camera device path: {device_path}")
-        self.head_cap = cv2.VideoCapture(device_path)
-        self.head_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self.head_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2 * self.head_camera_resolution[1])
-        self.head_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.head_camera_resolution[0])
-        self.head_cap.set(cv2.CAP_PROP_FPS, self.desired_stream_fps)
+        # Source, layout and rotation come from --head_camera_* (see head_camera.py);
+        # the defaults reproduce HTD's stereo USB camera.
+        self.head_camera = make_head_camera(
+            self.args, self.head_frame_res, self.desired_stream_fps,
+            embodiment=self.args.embodiment,
+            device_lookup=lambda name: find_device_path_by_name(list_video_devices(), name),
+        )
         
         if self.args.use_wrist_camera:
             self.wrist_camera_resolution = resolution_map[self.args.wrist_camera_res]
@@ -352,26 +320,24 @@ class HTDPolicyRollout:
         try:
             while self.running:
                 start_time = time.time()
-                ret, frame = self.head_cap.read()
-                if 'g1' in self.args.embodiment:
-                    frame = cv2.rotate(frame, cv2.ROTATE_180)
-                frame = cv2.resize(frame, (2 * self.head_frame_res[1], self.head_frame_res[0]))
-                image_left = frame[:, :self.head_frame_res[1], :]
-                image_right = frame[:, self.head_frame_res[1]:, :]
-                if self.crop_size_w != 0:
-                    bgr = np.hstack((image_left[self.crop_size_h:, self.crop_size_w:-self.crop_size_w],
-                                    image_right[self.crop_size_h:, self.crop_size_w:-self.crop_size_w]))
-                else:
-                    bgr = np.hstack((image_left[self.crop_size_h:, :],
-                                    image_right[self.crop_size_h:, :]))
+                frame = self.head_camera.read()  # BGR stereo pair, already rotated and laid out
+                if frame is not None:
+                    image_left = frame[:, :self.head_frame_res[1], :]
+                    image_right = frame[:, self.head_frame_res[1]:, :]
+                    if self.crop_size_w != 0:
+                        bgr = np.hstack((image_left[self.crop_size_h:, self.crop_size_w:-self.crop_size_w],
+                                        image_right[self.crop_size_h:, self.crop_size_w:-self.crop_size_w]))
+                    else:
+                        bgr = np.hstack((image_left[self.crop_size_h:, :],
+                                        image_right[self.crop_size_h:, :]))
 
-                self.head_color_frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    self.head_color_frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 elapsed_time = time.time() - start_time
                 sleep_time = frame_duration - elapsed_time
                 if sleep_time > 0:
                     time.sleep(sleep_time)
         finally:
-            self.head_cap.release()
+            self.head_camera.close()
 
     def wrist_left_camera_stream_thread(self):
         frame_duration = 1 / self.desired_stream_fps
@@ -781,120 +747,210 @@ class HTDPolicyRollout:
         self.dds_writer_reset_command.write(msg)
         print(f"Reset command sent to {self.embodiment} controller")
     
-    def publish_wb_teleop_data(self, left_eef_pos, left_eef_rot, right_eef_pos, right_eef_rot, left_hand_joints, right_hand_joints, teleop_torso_rot_uni, teleop_torso_height, velocity_commands=None):
-        """
-        Publish synchronized whole-body teleoperation data via DDS (includes torso data)
-        Args:
-            left_eef_pos: 3D position of left end-effector
-            left_eef_rot: RPY rotation of left end-effector
-            right_eef_pos: 3D position of right end-effector
-            right_eef_rot: RPY rotation of right end-effector
-            left_hand_joints: 75D hand joints
-            right_hand_joints: 75D hand joints
-            teleop_torso_rot_uni: RPY rotation of torso (3D)
-            teleop_torso_height: Height of torso (scalar)
-            velocity_commands: 3D velocity [lin_vel_x, lin_vel_y, ang_vel_z] (optional)
-        """
-        # Convert RPY to rotation matrix
-        left_rot_mat = self.rpy_to_rot_mat(left_eef_rot)
-        right_rot_mat = self.rpy_to_rot_mat(right_eef_rot)
-        
-        # Construct 4x4 transformation matrices for arms
-        left_arm_pose = np.eye(4)
-        left_arm_pose[:3, :3] = left_rot_mat
-        left_arm_pose[:3, 3] = left_eef_pos
-        
-        right_arm_pose = np.eye(4)
-        right_arm_pose[:3, :3] = right_rot_mat
-        right_arm_pose[:3, 3] = right_eef_pos
-
-        if velocity_commands is None:
-            vel_list = []
-        else:
-            vel_list = velocity_commands.tolist() if hasattr(velocity_commands, 'tolist') else list(velocity_commands)
-
+    def publish_wb_teleop_data(self, targets):
+        """Publish one step's whole-body teleop targets (g1_command.teleop_targets) as TeleopDataWB."""
+        vel = targets['velocity_commands']
         msg = TeleopDataWB(
             timestamp=time.time(),
-            left_arm_pose=left_arm_pose.flatten().tolist(),
-            right_arm_pose=right_arm_pose.flatten().tolist(),
-            left_hand_pose=left_hand_joints.tolist(),
-            right_hand_pose=right_hand_joints.tolist(),
-            torso_rpy=teleop_torso_rot_uni.tolist() if hasattr(teleop_torso_rot_uni, 'tolist') else list(teleop_torso_rot_uni),
-            torso_height=float(teleop_torso_height),
-            velocity_commands=vel_list
+            left_arm_pose=targets['left_arm_pose'].tolist(),
+            right_arm_pose=targets['right_arm_pose'].tolist(),
+            left_hand_pose=targets['left_hand_pose'].tolist(),
+            right_hand_pose=targets['right_hand_pose'].tolist(),
+            torso_rpy=targets['torso_rpy'].tolist(),
+            torso_height=targets['torso_height'],
+            velocity_commands=vel.tolist() if hasattr(vel, 'tolist') else list(vel),
         )
         self.dds_writer_teleop.write(msg)
 
+    def init_chunk_schedule(self):
+        """When to infer, crossfade between chunks, optional background inference."""
+        self.scheduler = ChunkScheduler(self.infer_interval, self.args.crossfade_steps,
+                                        self.args.async_inference, kinds=G1_COMMAND_KINDS)
+        self._infer_requests = queue.Queue(maxsize=1)
+        self._infer_results = queue.Queue()
+        self._dream_t_obs = None
+        self._last_overrun_report = (0, 0.0)
+        print(f'Chunk schedule: {self.scheduler.describe()}')
+
     def policy_rollout(self):
-        rollout_idx = self.rollout_counter % self.infer_interval
-        if self.policy_class == 'HIT':
-            if rollout_idx == 0:
-                self.update_embodiment_proprio_states()
-                qpos, curr_image = self._build_g1_hit_obs()
-                with torch.no_grad():
-                    a_hat = self.bc_model(qpos, curr_image)
-                actions_np = a_hat.squeeze(0).cpu().detach().numpy()
-                actions_np = self.hit_post_process(actions_np)
-                self._process_g1_hit_action_trajectory(actions_np)
-            self._execute_g1_action(rollout_idx)
-        else:
-            use_dream = self.args.dream_touch and self.has_dream_head
-            if rollout_idx == 0:
-                self.update_embodiment_proprio_states()
-                obs_dict, obs_mask_dict = self._build_g1_obs()
-                with torch.no_grad():
-                    result = self.bc_model(obs_dict, self.embodiment, obs_mask_dict, infer_dream=use_dream)
-                if use_dream:
-                    self.act_dict, dream_dict = result
-                    self._flush_dream_accum()
-                    self._init_dream_accum(dream_dict)
-                else:
-                    self.act_dict = result
-                self._process_g1_action_trajectory()
-            self._execute_g1_action(rollout_idx)
-            if use_dream and self._dream_accum is not None:
-                self._record_dream_gt(rollout_idx)
+        """One control step: adopt finished inferences, start the next one when due, send a command."""
+        t = self.rollout_counter
+        sched = self.scheduler
+        if self.args.async_inference:
+            self._adopt_finished_inference(t)
+        if sched.should_request(t):
+            request = self._capture_inference_input()
+            gen = sched.mark_requested(t)
+            if self.args.async_inference:
+                self._queue_inference(gen, t, request)
+            else:  # blocking: the control loop waits, as upstream rollout did
+                self._adopt_inference(gen, t, t, self._run_inference(request))
+        cmd = sched.command(t)
+        if cmd is not None:
+            self._execute_g1_command(cmd)
+            if getattr(self, '_dream_accum', None) is not None and self._dream_t_obs is not None:
+                idx = t - self._dream_t_obs
+                if 0 <= idx < self.infer_interval:
+                    self._record_dream_gt(idx)
+        self._report_overrun()
         self.rollout_counter += 1
 
-    def _build_g1_obs(self):
+    def _capture_inference_input(self):
+        """Read the robot state and build the model input now, on the control thread.
+
+        MXT inputs are built on the CPU (cheap: copies of small arrays and one uint8
+        frame); FastInference copies them into its GPU buffers on the inference thread,
+        so host-to-device transfers never stall the control loop.
+        """
+        self.update_embodiment_proprio_states()
+        if self.policy_class == 'HIT':
+            return 'HIT', self._build_g1_hit_obs('cpu' if self.args.async_inference else None)
+        return 'MXT', self._build_g1_obs('cpu')
+
+    def warmup_inference(self):
+        """Run the model on the current (idle) observation before rollout starts: cuDNN
+        algorithm selection, CUDA graph capture and a check that the graph matches the
+        normal forward. Prints what inference will use and how long it takes."""
+        if self.policy_class != 'MXT':
+            return
+        if getattr(self, 'head_color_frame', None) is None:
+            self.head_color_frame = np.zeros((*self.main_cam_size, 3), dtype=np.uint8)
+        for side in ('left', 'right'):
+            if self.args.use_wrist_camera and getattr(self, f'wrist_{side}_color_frame', None) is None:
+                setattr(self, f'wrist_{side}_color_frame', np.zeros((*self.wrist_cam_size, 3), dtype=np.uint8))
+        obs, mask = self._build_g1_obs('cpu')
+        variants = [False] + ([True] if self.args.dream_touch and self.has_dream_head else [])
+        for dream in variants:
+            status = self.inference.warmup(obs, mask, infer_dream=dream)
+            ms = self.inference.time_ms(obs, mask, infer_dream=dream)
+            print(f'Inference{" (with dream heads)" if dream else ""}: {status}; '
+                  f'{ms:.1f} ms on {self.inference.gpu_name}')
+
+    def _to_policy_device(self, x):
+        if isinstance(x, torch.Tensor):
+            return x.to(self.device)
+        if isinstance(x, dict):
+            return {k: self._to_policy_device(v) for k, v in x.items()}
+        if isinstance(x, (tuple, list)):
+            return type(x)(self._to_policy_device(v) for v in x)
+        return x
+
+    def _run_inference(self, request):
+        """Model forward + conversion to a command trajectory. Returns (trajectory, dream, seconds)."""
+        kind, obs = request
+        start = time.perf_counter()
+        dream_dict = None
+        if kind == 'HIT':
+            qpos, curr_image = self._to_policy_device(obs)
+            with torch.inference_mode():
+                a_hat = self.bc_model(qpos, curr_image)
+            traj = self._hit_trajectory(self.hit_post_process(a_hat.squeeze(0).cpu().detach().numpy()))
+        else:
+            obs_dict, obs_mask_dict = obs
+            use_dream = self.args.dream_touch and self.has_dream_head
+            result = self.inference(obs_dict, obs_mask_dict, infer_dream=use_dream)  # GPU, CUDA graph
+            act_dict, dream_dict = result if use_dream else (result, None)
+            traj = self._mxt_trajectory(act_dict)
+        return traj, dream_dict, time.perf_counter() - start
+
+    def _adopt_inference(self, gen, t_obs, t_now, result):
+        traj, dream_dict, seconds = result
+        if not self.scheduler.submit(traj, t_obs, t_now, generation=gen,
+                                     latency_steps=seconds * self.args.control_freq):
+            return  # rollout was reset while this inference ran
+        self.command_traj_dict = traj
+        if self.scheduler.switches == 1:
+            sched = self.scheduler
+            note = '' if sched.crossfade == sched.crossfade_requested else (
+                f' (crossfade limited to {sched.crossfade} steps: chunk has '
+                f'{len(next(iter(traj.values())))} steps, interval is {sched.interval})')
+            print(f'First chunk after {1000 * seconds:.0f} ms inference{note}')
+        if dream_dict is not None:
+            self._flush_dream_accum()
+            self._init_dream_accum(dream_dict)
+            self._dream_t_obs = t_obs
+
+    def _queue_inference(self, gen, t_obs, request):
+        try:  # drop a request left over from before a reset
+            self._infer_requests.get_nowait()
+        except queue.Empty:
+            pass
+        self._infer_requests.put((gen, t_obs, request))
+
+    def _adopt_finished_inference(self, t):
+        while True:
+            try:
+                gen, t_obs, result = self._infer_results.get_nowait()
+            except queue.Empty:
+                return
+            if result is None:
+                self.scheduler.cancel_request(gen)
+            else:
+                self._adopt_inference(gen, t_obs, t, result)
+
+    def inference_worker_thread(self):
+        """Background inference for --async_inference: commands keep flowing meanwhile."""
+        while self.running:
+            try:
+                gen, t_obs, request = self._infer_requests.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                result = self._run_inference(request)
+            except Exception:
+                traceback.print_exc()
+                result = None
+            self._infer_results.put((gen, t_obs, result))
+
+    def _report_overrun(self):
+        """Warn (at most once a second) when inference is too slow and a chunk ran out."""
+        n, last = self._last_overrun_report
+        if self.scheduler.overrun_steps > n and time.time() - last > 1.0:
+            print(f'Warning: inference late, holding the last command of the chunk '
+                  f'({self.scheduler.overrun_steps} steps so far)')
+            self._last_overrun_report = (self.scheduler.overrun_steps, time.time())
+
+    def _build_g1_obs(self, device=None):
         """Build observation and mask dicts for g1_inspire_wb from current proprio state."""
+        device = device or self.device  # "cpu" when a background thread moves it to the GPU
         obs_dict = {}
         obs_mask_dict = {}
         # body_pose_proprio (6D)
-        obs_dict['body_pose_proprio'] = torch.tensor(self.body_pose_proprio).float().to(self.device).unsqueeze(0)
-        obs_mask_dict['body_pose_proprio'] = torch.ones(6).bool().to(self.device).unsqueeze(0)
+        obs_dict['body_pose_proprio'] = torch.tensor(self.body_pose_proprio).float().to(device).unsqueeze(0)
+        obs_mask_dict['body_pose_proprio'] = torch.ones(6).bool().to(device).unsqueeze(0)
         # eef_pose_proprio (12D absolute EEF pose)
         if 'eef_pose_proprio' in self.obs_keys:
-            obs_dict['eef_pose_proprio'] = torch.tensor(self.eef_pose_proprio).float().to(self.device).unsqueeze(0)
-            obs_mask_dict['eef_pose_proprio'] = torch.ones(12).bool().to(self.device).unsqueeze(0)
+            obs_dict['eef_pose_proprio'] = torch.tensor(self.eef_pose_proprio).float().to(device).unsqueeze(0)
+            obs_mask_dict['eef_pose_proprio'] = torch.ones(12).bool().to(device).unsqueeze(0)
         # eef_to_body_pose: split or combined depending on model config
         if 'left_eef_to_body_pose_proprio' in self.obs_keys:
-            obs_dict['right_eef_to_body_pose_proprio'] = torch.tensor(self.eef_to_body_pose_proprio[:6]).float().to(self.device).unsqueeze(0)
-            obs_dict['left_eef_to_body_pose_proprio'] = torch.tensor(self.eef_to_body_pose_proprio[6:12]).float().to(self.device).unsqueeze(0)
-            obs_mask_dict['right_eef_to_body_pose_proprio'] = torch.ones(6).bool().to(self.device).unsqueeze(0)
-            obs_mask_dict['left_eef_to_body_pose_proprio'] = torch.ones(6).bool().to(self.device).unsqueeze(0)
+            obs_dict['right_eef_to_body_pose_proprio'] = torch.tensor(self.eef_to_body_pose_proprio[:6]).float().to(device).unsqueeze(0)
+            obs_dict['left_eef_to_body_pose_proprio'] = torch.tensor(self.eef_to_body_pose_proprio[6:12]).float().to(device).unsqueeze(0)
+            obs_mask_dict['right_eef_to_body_pose_proprio'] = torch.ones(6).bool().to(device).unsqueeze(0)
+            obs_mask_dict['left_eef_to_body_pose_proprio'] = torch.ones(6).bool().to(device).unsqueeze(0)
         elif 'eef_to_body_pose_proprio' in self.obs_keys:
-            obs_dict['eef_to_body_pose_proprio'] = torch.tensor(self.eef_to_body_pose_proprio).float().to(self.device).unsqueeze(0)
-            obs_mask_dict['eef_to_body_pose_proprio'] = torch.ones(12).bool().to(self.device).unsqueeze(0)
+            obs_dict['eef_to_body_pose_proprio'] = torch.tensor(self.eef_to_body_pose_proprio).float().to(device).unsqueeze(0)
+            obs_mask_dict['eef_to_body_pose_proprio'] = torch.ones(12).bool().to(device).unsqueeze(0)
         # eef_link_proprio: split or combined
         if 'left_eef_link_proprio' in self.obs_keys:
-            obs_dict['right_eef_link_proprio'] = torch.tensor(self.eef_link_proprio[:15]).float().to(self.device).unsqueeze(0)
-            obs_dict['left_eef_link_proprio'] = torch.tensor(self.eef_link_proprio[15:30]).float().to(self.device).unsqueeze(0)
-            obs_mask_dict['right_eef_link_proprio'] = torch.ones(15).bool().to(self.device).unsqueeze(0)
-            obs_mask_dict['left_eef_link_proprio'] = torch.ones(15).bool().to(self.device).unsqueeze(0)
+            obs_dict['right_eef_link_proprio'] = torch.tensor(self.eef_link_proprio[:15]).float().to(device).unsqueeze(0)
+            obs_dict['left_eef_link_proprio'] = torch.tensor(self.eef_link_proprio[15:30]).float().to(device).unsqueeze(0)
+            obs_mask_dict['right_eef_link_proprio'] = torch.ones(15).bool().to(device).unsqueeze(0)
+            obs_mask_dict['left_eef_link_proprio'] = torch.ones(15).bool().to(device).unsqueeze(0)
         elif 'eef_link_proprio' in self.obs_keys:
-            obs_dict['eef_link_proprio'] = torch.tensor(self.eef_link_proprio).float().to(self.device).unsqueeze(0)
-            obs_mask_dict['eef_link_proprio'] = torch.ones(30).bool().to(self.device).unsqueeze(0)
+            obs_dict['eef_link_proprio'] = torch.tensor(self.eef_link_proprio).float().to(device).unsqueeze(0)
+            obs_mask_dict['eef_link_proprio'] = torch.ones(30).bool().to(device).unsqueeze(0)
         # main image
         main_frame = self.head_color_frame.copy()
         target_h, target_w = self.main_cam_size
         if main_frame.shape[:2] != (target_h, target_w):
             main_frame = cv2.resize(main_frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
-        main_image = torch.from_numpy(main_frame).float()
-        main_image.div_(255.0)
-        main_image = main_image.permute(2, 0, 1).to(self.device)
+        # uint8 channels-first view of the frame: the model scales images to [0, 1] on the GPU,
+        # exactly as in training; the copy to the GPU is 4x smaller than float32, and the
+        # HWC -> CHW reordering happens on the GPU (FastInference), not on the control thread.
+        main_image = torch.from_numpy(main_frame).permute(2, 0, 1).to(device)  # a view on the CPU: no copy
         obs_dict['main_image'] = main_image.unsqueeze(0)
-        obs_mask_dict['main_image'] = torch.tensor([True]).to(self.device).unsqueeze(0)
+        obs_mask_dict['main_image'] = torch.tensor([True]).to(device).unsqueeze(0)
         # wrist images (dual)
         if self.args.use_wrist_camera:
             target_h, target_w = self.wrist_cam_size
@@ -902,66 +958,64 @@ class HTDPolicyRollout:
                 left_frame = self.wrist_left_color_frame.copy()
                 if left_frame.shape[1] != target_w or left_frame.shape[0] != target_h:
                     left_frame = cv2.resize(left_frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
-                left_wrist = torch.from_numpy(left_frame).float().div_(255.0)
-                left_wrist = left_wrist.permute(2, 0, 1).to(self.device)
+                left_wrist = torch.from_numpy(left_frame).permute(2, 0, 1).to(device)  # uint8 view
                 obs_dict['left_wrist_image'] = left_wrist.unsqueeze(0)
-                obs_mask_dict['left_wrist_image'] = torch.tensor([True]).to(self.device).unsqueeze(0)
+                obs_mask_dict['left_wrist_image'] = torch.tensor([True]).to(device).unsqueeze(0)
             if 'right_wrist_image' in self.obs_keys:
                 right_frame = self.wrist_right_color_frame.copy()
                 if right_frame.shape[1] != target_w or right_frame.shape[0] != target_h:
                     right_frame = cv2.resize(right_frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
-                right_wrist = torch.from_numpy(right_frame).float().div_(255.0)
-                right_wrist = right_wrist.permute(2, 0, 1).to(self.device)
+                right_wrist = torch.from_numpy(right_frame).permute(2, 0, 1).to(device)  # uint8 view
                 obs_dict['right_wrist_image'] = right_wrist.unsqueeze(0)
-                obs_mask_dict['right_wrist_image'] = torch.tensor([True]).to(self.device).unsqueeze(0)
+                obs_mask_dict['right_wrist_image'] = torch.tensor([True]).to(device).unsqueeze(0)
         # robot joint pos proprio (29-dim)
         if 'robot_joint_pos_proprio' in self.obs_keys:
-            obs_dict['robot_joint_pos_proprio'] = torch.tensor(self.robot_joint_pos_proprio).float().to(self.device).unsqueeze(0)
-            obs_mask_dict['robot_joint_pos_proprio'] = torch.ones(29).bool().to(self.device).unsqueeze(0)
+            obs_dict['robot_joint_pos_proprio'] = torch.tensor(self.robot_joint_pos_proprio).float().to(device).unsqueeze(0)
+            obs_mask_dict['robot_joint_pos_proprio'] = torch.ones(29).bool().to(device).unsqueeze(0)
         # eef joint pos proprio (6-dim each)
         if 'left_eef_joint_pos_proprio' in self.obs_keys:
-            obs_dict['left_eef_joint_pos_proprio'] = torch.tensor(self.left_eef_joint_pos_proprio).float().to(self.device).unsqueeze(0)
-            obs_mask_dict['left_eef_joint_pos_proprio'] = torch.ones(6).bool().to(self.device).unsqueeze(0)
+            obs_dict['left_eef_joint_pos_proprio'] = torch.tensor(self.left_eef_joint_pos_proprio).float().to(device).unsqueeze(0)
+            obs_mask_dict['left_eef_joint_pos_proprio'] = torch.ones(6).bool().to(device).unsqueeze(0)
         if 'right_eef_joint_pos_proprio' in self.obs_keys:
-            obs_dict['right_eef_joint_pos_proprio'] = torch.tensor(self.right_eef_joint_pos_proprio).float().to(self.device).unsqueeze(0)
-            obs_mask_dict['right_eef_joint_pos_proprio'] = torch.ones(6).bool().to(self.device).unsqueeze(0)
+            obs_dict['right_eef_joint_pos_proprio'] = torch.tensor(self.right_eef_joint_pos_proprio).float().to(device).unsqueeze(0)
+            obs_mask_dict['right_eef_joint_pos_proprio'] = torch.ones(6).bool().to(device).unsqueeze(0)
         # finger force proprio
         if 'left_eef_finger_force_proprio' in self.obs_keys:
-            obs_dict['left_eef_finger_force_proprio'] = torch.tensor(self.left_eef_finger_force_proprio).float().to(self.device).unsqueeze(0)
-            obs_mask_dict['left_eef_finger_force_proprio'] = torch.ones(6).bool().to(self.device).unsqueeze(0)
+            obs_dict['left_eef_finger_force_proprio'] = torch.tensor(self.left_eef_finger_force_proprio).float().to(device).unsqueeze(0)
+            obs_mask_dict['left_eef_finger_force_proprio'] = torch.ones(6).bool().to(device).unsqueeze(0)
         if 'right_eef_finger_force_proprio' in self.obs_keys:
-            obs_dict['right_eef_finger_force_proprio'] = torch.tensor(self.right_eef_finger_force_proprio).float().to(self.device).unsqueeze(0)
-            obs_mask_dict['right_eef_finger_force_proprio'] = torch.ones(6).bool().to(self.device).unsqueeze(0)
+            obs_dict['right_eef_finger_force_proprio'] = torch.tensor(self.right_eef_finger_force_proprio).float().to(device).unsqueeze(0)
+            obs_mask_dict['right_eef_finger_force_proprio'] = torch.ones(6).bool().to(device).unsqueeze(0)
         # tactile obs (per-finger)
         tactile_keys = [k for k in self.obs_keys if 'tactile' in k]
         for key in tactile_keys:
             buf = getattr(self, key, None)
             if buf is not None:
-                obs_dict[key] = torch.tensor(buf).float().to(self.device).unsqueeze(0)
-                obs_mask_dict[key] = torch.ones(buf.shape[0]).bool().to(self.device).unsqueeze(0)
+                obs_dict[key] = torch.tensor(buf).float().to(device).unsqueeze(0)
+                obs_mask_dict[key] = torch.ones(buf.shape[0]).bool().to(device).unsqueeze(0)
         return obs_dict, obs_mask_dict
 
-    def _process_g1_action_trajectory(self):
-        """Process model output into teleop-ready trajectory for g1_inspire_wb."""
-        body_pose_traj = self.act_dict['body_pose'].squeeze(0).cpu().detach().numpy()
+    def _mxt_trajectory(self, act_dict):
+        """MXT output -> teleop-ready command trajectory (chunk_len, D) per command."""
+        body_pose_traj = act_dict['body_pose'].squeeze(0).cpu().detach().numpy()
         # eef_to_body: split or combined
-        if 'left_eef_to_body_pose' in self.act_dict:
-            right_eef_traj = self.act_dict['right_eef_to_body_pose'].squeeze(0).cpu().detach().numpy()
-            left_eef_traj = self.act_dict['left_eef_to_body_pose'].squeeze(0).cpu().detach().numpy()
+        if 'left_eef_to_body_pose' in act_dict:
+            right_eef_traj = act_dict['right_eef_to_body_pose'].squeeze(0).cpu().detach().numpy()
+            left_eef_traj = act_dict['left_eef_to_body_pose'].squeeze(0).cpu().detach().numpy()
         else:
-            combined = self.act_dict['eef_to_body_pose'].squeeze(0).cpu().detach().numpy()
+            combined = act_dict['eef_to_body_pose'].squeeze(0).cpu().detach().numpy()
             right_eef_traj = combined[:, :6]
             left_eef_traj = combined[:, 6:]
         # eef_link: split or combined
-        if 'left_eef_link_pose' in self.act_dict:
-            right_link_traj = self.act_dict['right_eef_link_pose'].squeeze(0).cpu().detach().numpy()
-            left_link_traj = self.act_dict['left_eef_link_pose'].squeeze(0).cpu().detach().numpy()
+        if 'left_eef_link_pose' in act_dict:
+            right_link_traj = act_dict['right_eef_link_pose'].squeeze(0).cpu().detach().numpy()
+            left_link_traj = act_dict['left_eef_link_pose'].squeeze(0).cpu().detach().numpy()
         else:
-            combined = self.act_dict['eef_link_pose'].squeeze(0).cpu().detach().numpy()
+            combined = act_dict['eef_link_pose'].squeeze(0).cpu().detach().numpy()
             right_link_traj = combined[:, :15]
             left_link_traj = combined[:, 15:]
-        vel_traj = self.act_dict['velocity_commands'].squeeze(0).cpu().detach().numpy()
-        self.command_traj_dict = {
+        vel_traj = act_dict['velocity_commands'].squeeze(0).cpu().detach().numpy()
+        return {
             'body_pose': body_pose_traj,
             'right_eef_to_body': right_eef_traj,
             'left_eef_to_body': left_eef_traj,
@@ -1042,13 +1096,29 @@ class HTDPolicyRollout:
             self._dream_accum[f'gt_latent_{key}'][step_idx] = gt_latent.cpu().numpy().squeeze(0)
 
     def _flush_dream_accum(self):
-        """Save the accumulated dream window to disk (synchronous). No-op if empty."""
+        """Hand the accumulated dream window to the writer thread (np.savez of ~80 MB of
+        frames would stall the control loop). No-op if empty."""
         if self._dream_accum is None:
             return
         path = os.path.join(self.dream_touch_save_dir, f'step_{self.dream_save_counter:06d}.npz')
-        np.savez(path, **self._dream_accum)
+        writer = getattr(self, '_dream_writer', None)
+        if writer is not None and writer.is_alive():
+            self._dream_write_queue.put((path, self._dream_accum))
+        else:
+            np.savez(path, **self._dream_accum)
         self.dream_save_counter += 1
         self._dream_accum = None
+
+    def _dream_writer_thread(self):
+        while True:
+            item = self._dream_write_queue.get()
+            if item is None:
+                return
+            path, accum = item
+            try:
+                np.savez(path, **accum)
+            except Exception:
+                traceback.print_exc()
 
     # ---- HIT observation / action helpers ----
 
@@ -1074,13 +1144,14 @@ class HTDPolicyRollout:
             raise ValueError(f"Unknown observation name for HIT rollout: {obs_name}")
         return fn()
 
-    def _build_g1_hit_obs(self):
+    def _build_g1_hit_obs(self, device=None):
         """Build qpos tensor and image tensor for HIT inference on g1_inspire_wb."""
+        device = device or self.device
         # --- qpos ---
         obs_parts = [self._get_hit_proprio_value(name) for name in self.hit_observation_names]
         qpos_np = np.concatenate(obs_parts, axis=-1).astype(np.float32)
         qpos_np = self.hit_pre_process(qpos_np)
-        qpos = torch.from_numpy(qpos_np).float().to(self.device).unsqueeze(0)
+        qpos = torch.from_numpy(qpos_np).float().to(device).unsqueeze(0)
 
         # --- images ---
         main_frame = self.head_color_frame.copy()
@@ -1110,14 +1181,14 @@ class HTDPolicyRollout:
             images[cam_name] = img_tensor
 
         if len({tuple(img.shape) for img in images.values()}) == 1:
-            curr_image = torch.stack(list(images.values()), dim=0).to(self.device).unsqueeze(0)
+            curr_image = torch.stack(list(images.values()), dim=0).to(device).unsqueeze(0)
         else:
             curr_image = {
-                name: img.to(self.device).unsqueeze(0) for name, img in images.items()
+                name: img.to(device).unsqueeze(0) for name, img in images.items()
             }
         return qpos, curr_image
 
-    def _process_g1_hit_action_trajectory(self, actions_np):
+    def _hit_trajectory(self, actions_np):
         """Split flat denormalized action array (chunk_size, action_dim) into trajectory dict.
 
         Action order matches action_name in HIT YAML:
@@ -1139,7 +1210,7 @@ class HTDPolicyRollout:
             parsed[name] = actions_np[:, offset:offset + dim]
             offset += dim
 
-        self.command_traj_dict = {
+        return {
             'body_pose': parsed['actions/body'],
             'right_eef_to_body': parsed.get('actions/right_eef_to_body', np.zeros((actions_np.shape[0], 6))),
             'left_eef_to_body': parsed.get('actions/left_eef_to_body', np.zeros((actions_np.shape[0], 6))),
@@ -1149,50 +1220,14 @@ class HTDPolicyRollout:
         }
 
     def _eef_link_to_hand_joints(self, eef_link_15d):
-        """Convert 15D fingertip positions (5 fingers x 3D) to 75D hand joint array."""
-        hand_25x3 = np.zeros((25, 3))
-        hand_25x3[4] = eef_link_15d[0:3]    # thumb
-        hand_25x3[9] = eef_link_15d[3:6]    # index
-        hand_25x3[14] = eef_link_15d[6:9]   # middle
-        hand_25x3[19] = eef_link_15d[9:12]  # ring
-        hand_25x3[24] = eef_link_15d[12:15] # pinky
-        unified_to_inspire = self.inspire_to_unified_eef[:3, :3].T
-        return (unified_to_inspire @ hand_25x3.T).T.flatten()
+        """15 fingertip coordinates -> 75-value hand keypoints (g1_command)."""
+        return eef_link_to_hand_keypoints(eef_link_15d, self.inspire_to_unified_eef)
 
-    def _execute_g1_action(self, rollout_idx):
-        """Send g1_inspire_wb action at given trajectory index as DDS teleop command."""
-        body_pose = self.command_traj_dict['body_pose'][rollout_idx]
-        left_eef = self.command_traj_dict['left_eef_to_body'][rollout_idx]
-        right_eef = self.command_traj_dict['right_eef_to_body'][rollout_idx]
-        left_link = self.command_traj_dict['left_eef_link'][rollout_idx]
-        right_link = self.command_traj_dict['right_eef_link'][rollout_idx]
-        # torso
-        torso_rot = body_pose[3:6].copy()
-        torso_height = body_pose[2] + 0.75
-        # right EEF: offsets + rotation remap (same as teleop in data_collect)
-        right_pos = right_eef[:3].copy()
-        right_pos[0] += 0.15
-        right_pos[2] += 0.45
-        right_rot = self.rpy_to_rot_mat(right_eef[3:6]) @ self.unified_to_unitree_right_eef_rot_remap
-        right_rot_rpy = self.rot_mat_to_rpy(right_rot)
-        # left EEF
-        left_pos = left_eef[:3].copy()
-        left_pos[0] += 0.15
-        left_pos[2] += 0.45
-        left_rot = self.rpy_to_rot_mat(left_eef[3:6]) @ self.unified_to_unitree_left_eef_rot_remap
-        left_rot_rpy = self.rot_mat_to_rpy(left_rot)
-        # hand joints from fingertip positions
-        right_hand_joints = self._eef_link_to_hand_joints(right_link)
-        left_hand_joints = self._eef_link_to_hand_joints(left_link)
-        # velocity commands from inferred model
-        vel_cmds = None
-        if self.args.send_velocity_commands and 'velocity_commands' in self.command_traj_dict:
-            vel_cmds = self.command_traj_dict['velocity_commands'][rollout_idx]
-        self.publish_wb_teleop_data(
-            left_pos, left_rot_rpy, right_pos, right_rot_rpy,
-            left_hand_joints, right_hand_joints,
-            torso_rot, torso_height, vel_cmds
-        )
+    def _execute_g1_command(self, cmd):
+        """Send one control step's command ({name: vector}, from ChunkScheduler) over DDS."""
+        send_velocity = bool(self.args.send_velocity_commands) and 'velocity_commands' in cmd
+        hand_type = getattr(self.args, 'inspire_hand_type', 'dftp')
+        self.publish_wb_teleop_data(teleop_targets(cmd, hand_type, send_velocity))
 
     def init_policy(self):
         self.policy_class = self.args.policy_class
@@ -1207,40 +1242,15 @@ class HTDPolicyRollout:
             raise NotImplementedError(f"Unsupported policy_class: {self.policy_class}")
 
     def _init_mxt_policy(self, model_path):
-        with open(os.path.join(model_path, 'all_configs.json'), 'r') as f:
-            saved_config = json.load(f)
-        self.main_cam_size = _mxt_camera_size(saved_config, 'main')
-        self.wrist_cam_size = _mxt_camera_size(saved_config, 'wrist')
-        embodiment_config_path = self.args.embodiment_config_path
-        transformer_trunk_config_path = self.args.trunk_config_path
-        with open(embodiment_config_path, 'r') as f:
-            emb_dict = _mxt_inference_config(yaml.load(f, Loader=yaml.FullLoader))
-        with open(transformer_trunk_config_path, 'r') as f:
-            transformer_dict = yaml.load(f, Loader=yaml.FullLoader)
-
-        stats_path = os.path.join(model_path, 'dataset_stats.pkl')
-        with open(stats_path, 'rb') as f:
-            stats_dict = pickle.load(f)
-        share_cross_attn = False
-        policy_config = {
-            'norm_stats': stats_dict, 
-            "embodiment_args_dict": emb_dict,
-            "transformer_args": transformer_dict,
-            "share_cross_attn": share_cross_attn,
-            }
-        policy = make_policy('MXT', policy_config)
-        policy.deserialize(
-            torch.load(
-                f'{model_path}/policy_last.ckpt',
-                map_location=self.device,
-                weights_only=True,
-            ),
-            mode='strict',
+        policy, info = load_mxt_policy(
+            model_path, self.args.embodiment_config_path, self.args.trunk_config_path,
+            self.device, checkpoint=self.args.checkpoint,
         )
-        policy.to(self.device)
-        policy.eval()
-        actual_device = next(policy.parameters()).device
-        print(f'loaded MXT model from {model_path} on {actual_device}')
+        emb_dict = info['emb_dict']
+        self.main_cam_size = info['main_cam_size']
+        self.wrist_cam_size = info['wrist_cam_size']
+        self.inference = FastInference(policy, self.embodiment, self.device, cuda_graph=self.args.cuda_graph)
+        print(f"loaded MXT model {info['checkpoint']} on {self.device} ({self.inference.gpu_name})")
         self.bc_model = policy
         self.obs_keys = [k for k in emb_dict[self.embodiment]['tokenizer'].keys()
                          if 'proprio' in k or 'image' in k or 'tactile' in k]
@@ -1262,6 +1272,9 @@ class HTDPolicyRollout:
             os.makedirs(self.dream_touch_save_dir, exist_ok=True)
             self.dream_save_counter = 0
             self._dream_accum = None
+            self._dream_write_queue = queue.Queue()
+            self._dream_writer = threading.Thread(target=self._dream_writer_thread, daemon=True)
+            self._dream_writer.start()
             print(f'Dream touch saving enabled -> {self.dream_touch_save_dir}')
             print(f'Dream keys: {self.dream_keys}')
             latent_keys = [k for k, v in self.dream_is_latent.items() if v]
@@ -1282,11 +1295,12 @@ class HTDPolicyRollout:
         self.hit_post_process = lambda a: a * stats_dict['action_std'] + stats_dict['action_mean']
 
         policy = make_policy(policy_class, policy_config)
-        policy.load_state_dict(torch.load(f'{model_path}/policy_last.ckpt', map_location=self.device))
+        policy.load_state_dict(torch.load(checkpoint_path(model_path, self.args.checkpoint), map_location=self.device))
         policy.to(self.device)
         policy.eval()
+        require_cuda(self.device, policy)
         actual_device = next(policy.parameters()).device
-        print(f'loaded HIT model from {model_path} on {actual_device}')
+        print(f'loaded HIT model from {model_path} on {actual_device} ({torch.cuda.get_device_name(actual_device)})')
         self.bc_model = policy
 
         self.hit_data_config = getattr(self.args, 'hit_data_config', None)
@@ -1347,66 +1361,48 @@ class HTDPolicyRollout:
 
         keyboard_listener_thread = threading.Thread(target=self.keyboard_listener_thread, daemon=True)
         keyboard_listener_thread.start()
+        if self.args.async_inference:
+            threading.Thread(target=self.inference_worker_thread, daemon=True).start()
 
         # Main control loop
         loop_period = 1.0 / self.args.control_freq
-        
+        # Background threads (inference, cameras) hand the GIL back to the control thread
+        # within 1 ms instead of Python's default 5 ms.
+        sys.setswitchinterval(0.001)
+        next_tick = time.perf_counter()
+
         try:
             while self.running:
-                loop_start = time.time()
+                loop_start = time.perf_counter()
                 if self.on_reset:
                     self.rollout_counter = 0
+                    self.scheduler.reset()
                 elif self.on_rollout:
                     if not self.pause_commands:
                         self.policy_rollout()
-                # Maintain loop rate
-                elapsed = time.time() - loop_start
-                sleep_time = loop_period - elapsed
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                elif elapsed > loop_period * 1.5:
+                elapsed = time.perf_counter() - loop_start
+                if elapsed > loop_period * 1.5:
                     print(f"Warning: Control loop exceeded target rate: {elapsed:.4f}s > {loop_period:.4f}s")
+                # Fixed-rate ticks (no drift from "sleep period - work"); after a long stall
+                # restart the schedule instead of bursting to catch up.
+                next_tick += loop_period
+                delay = next_tick - time.perf_counter()
+                if delay > 0:
+                    time.sleep(delay)
+                elif delay < -loop_period:
+                    next_tick = time.perf_counter()
                     
         except KeyboardInterrupt:
             print("\nKeyboard interrupt received, shutting down...")
             self.running = False
 
     def rot_mat_to_rpy(self, R):
-        """
-        Convert a rotation matrix to Euler angles (roll, pitch, yaw) with ZYX order.
-        This method is more numerically stable, especially near singularities.
-        """
-        sy = -R[2, 0]
-        singular_threshold = 1e-6  # Threshold to check for singularity
-        cy = np.sqrt(R[0, 0]**2 + R[1, 0]**2)
-
-        # Handle singularity
-        if cy < singular_threshold:
-            x = np.arctan2(-R[1, 2], R[1, 1])
-            y = np.arctan2(sy, cy)
-            z = 0  # Yaw is indeterminate in this case
-        else:
-            x = np.arctan2(R[2, 1], R[2, 2])
-            y = np.arctan2(sy, cy)
-            z = np.arctan2(R[1, 0], R[0, 0])
-
-        return np.array([x, y, z])
+        """Rotation matrix -> ZYX roll/pitch/yaw (g1_command.rot_mat_to_rpy)."""
+        return rot_mat_to_rpy(R)
 
     def rpy_to_rot_mat(self, rpy):
-        """
-        Convert Euler angles (roll, pitch, yaw) with ZYX order to a rotation matrix.
-        """
-        x, y, z = rpy
-        cx, sx = np.cos(x), np.sin(x)
-        cy, sy = np.cos(y), np.sin(y)
-        cz, sz = np.cos(z), np.sin(z)
-
-        R = np.array([
-            [cy * cz, cz * sx * sy - cx * sz, cx * cz * sy + sx * sz],
-            [cy * sz, cx * cz + sx * sy * sz, cx * sy * sz - cz * sx],
-            [-sy, cy * sx, cx * cy]
-        ])
-        return R
+        """ZYX roll/pitch/yaw -> rotation matrix (g1_command.rpy_to_rot_mat)."""
+        return rpy_to_rot_mat(rpy)
 
     def close(self):
         """Clean shutdown of data collector"""
@@ -1414,6 +1410,9 @@ class HTDPolicyRollout:
 
         if hasattr(self, '_dream_accum') and self._dream_accum is not None:
             self._flush_dream_accum()
+        if getattr(self, '_dream_writer', None) is not None:  # finish writing queued windows
+            self._dream_write_queue.put(None)
+            self._dream_writer.join(timeout=30)
 
         # Clean up DDS resources
         if hasattr(self, 'dds_participant'):
@@ -1476,7 +1475,7 @@ def _validate_policy_rollout_args(parser, args):
         required_artifact_paths = [
             artifact_config_path,
             os.path.join(args.model_path, 'dataset_stats.pkl'),
-            os.path.join(args.model_path, 'policy_last.ckpt'),
+            checkpoint_path(args.model_path, args.checkpoint),
         ]
         missing_artifact_paths = [
             path for path in required_artifact_paths if not os.path.isfile(path)
@@ -1757,7 +1756,7 @@ def _validate_policy_rollout_args(parser, args):
     required_artifact_paths = [
         artifact_config_path,
         os.path.join(args.model_path, 'dataset_stats.pkl'),
-        os.path.join(args.model_path, 'policy_last.ckpt'),
+        checkpoint_path(args.model_path, args.checkpoint),
     ]
     missing_artifact_paths = [
         path for path in required_artifact_paths if not os.path.isfile(path)
@@ -1858,6 +1857,10 @@ def _validate_policy_rollout_args(parser, args):
             if (not isinstance(horizon, int) or isinstance(horizon, bool) or horizon <= 0
                     or (chunk_size is not None and horizon != chunk_size)):
                 parser.error(f'MXT {group}.{name} action_horizon must be positive and match checkpoint chunk_size')
+    if isinstance(chunk_size, int) and not 1 <= args.inference_interval <= chunk_size:
+        parser.error(f'--inference_interval must be between 1 and the checkpoint chunk_size ({chunk_size})')
+    if args.crossfade_steps < 0:
+        parser.error('--crossfade_steps must be >= 0')
 
     tokenizer_config = g1_config.get('tokenizer')
     if not isinstance(tokenizer_config, dict):
@@ -1916,8 +1919,13 @@ if __name__ == "__main__":
     parser.add_argument("--embodiment_config_path", type=str, default=None, help="path to the embodiment config YAML (required for MXT policy rollout)")
     parser.add_argument("--trunk_config_path", type=str, default=None, help="path to the transformer trunk YAML paired with the embodiment config (required for MXT policy rollout)")
     parser.add_argument("--model_path", type=str, default='', help="path to the model")
+    parser.add_argument("--checkpoint", type=str, default='policy_last.ckpt',
+                        help="checkpoint file inside --model_path (e.g. policy_best.ckpt) or a path to one")
     parser.add_argument("--replay", type=str2bool, default=False, help="if replay a trajectory")
-    parser.add_argument("--inference_interval", type=int, default=60, help="model inference interval within the control loop (coupled with the control frequency)") #
+    parser.add_argument("--inference_interval", type=int, default=60, help="chunk step at which rollout switches to the next chunk (with --async_inference the next inference starts early enough to be ready by then)")
+    parser.add_argument("--crossfade_steps", type=int, default=15, help="blend from the old chunk into each new one over this many control steps (0 = jump; limited to chunk length - inference_interval)")
+    parser.add_argument("--cuda_graph", type=str2bool, default=True, help="replay MXT inference as one captured CUDA graph (verified against the normal forward at start-up; falls back automatically)")
+    parser.add_argument("--async_inference", type=str2bool, default=True, help="run inference in a background thread so commands keep flowing; False = the control loop waits for each inference (upstream behaviour)")
     parser.add_argument("--wrist_cam_width", type=int, default=None, help="optional wrist width check (input size is read from the training metadata)")
     parser.add_argument("--wrist_cam_height", type=int, default=None, help="optional wrist height check (input size is read from the training metadata)")
     parser.add_argument("--policy_class", type=str, default='MXT', choices=['MXT', 'HIT'], help="policy class: MXT or HIT")
@@ -1927,7 +1935,9 @@ if __name__ == "__main__":
     parser.add_argument("--send_velocity_commands", type=str2bool, default=False, help="send inferred velocity commands to the robot for locomotion control")
     parser.add_argument("--inspire_hand_type", type=str, default='dftp', choices=['dftp', 'f1'], help="Inspire hand type: dftp (default) or f1 (capacitive)")
 
+    add_head_camera_args(parser)
     args = parser.parse_args()
+    resolve_head_camera_args(args, args.embodiment)
     _validate_policy_rollout_args(parser, args)
     
     # Create data collector
