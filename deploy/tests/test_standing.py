@@ -35,3 +35,10 @@ def test_height_band_is_symmetric_about_stand_height():
     assert c.update(StandingSample(**{**GOOD, "torso_height": 0.78 + 0.059}), 0.0).failing == ()
     c.reset()
     assert c.update(StandingSample(**{**GOOD, "torso_height": 0.78 - 0.061}), 0.0).failing == ("height",)
+
+def test_nan_inputs_fail_closed():
+    nan = float("nan")
+    c = StandingCheck(G1_SPEC.standing)
+    for key, name in (("torso_height", "height"), ("roll", "tilt"), ("pitch", "tilt"), ("gyro_norm", "gyro"),
+                      ("leg_dq_max", "legs"), ("lowstate_age_s", "stale")):
+        assert c.update(StandingSample(**{**GOOD, key: nan}), 0.0).failing == (name,), key
