@@ -12,6 +12,7 @@ code fixed together:
     ``realsense``   an Intel RealSense colour stream on this PC (pyrealsense2)
     ``zmq``         a RealSense served over ZMQ REQ/REP, e.g. the G1 Jetson camera
                     server (reply part 0 is a JPEG BGR colour frame)
+    ``static``      a fixed image file, or a grey test frame (sim tests, no hardware)
 * **layout** - how one source frame becomes the ``H x 2W`` pair. It must match
   how the training images were made:
     ``stereo``      the frame already is a side-by-side pair; resize to 2W x H
@@ -28,12 +29,13 @@ pyzmq) are imported only by the source that needs them.
 """
 from __future__ import annotations
 
+import os
 import time
 
 import cv2
 import numpy as np
 
-SOURCES = ('stereo_usb', 'opencv', 'realsense', 'zmq')
+SOURCES = ('stereo_usb', 'opencv', 'realsense', 'zmq', 'static')
 LAYOUTS = ('stereo', 'duplicate', 'stretch')
 ROTATIONS = {
     0: None,
@@ -153,6 +155,29 @@ class _ZmqSource:
         self.socket.close()
 
 
+class _StaticSource:
+    """The same frame on every read (no hardware)."""
+
+    def __init__(self, frame):
+        self.frame = frame
+
+    def read(self):
+        return self.frame.copy()
+
+    def close(self):
+        pass
+
+
+def _static_frame(device, width, height):
+    """``device`` as an image file resized to width x height, else mid-grey with a white 20-px border."""
+    frame = cv2.imread(device) if isinstance(device, str) and os.path.isfile(device) else None
+    if frame is not None:
+        return cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+    frame = np.full((height, width, 3), 255, dtype=np.uint8)
+    frame[20:-20, 20:-20] = 128
+    return frame
+
+
 class HeadCamera:
     """A head-camera source plus the rotation and layout that match training."""
 
@@ -192,7 +217,8 @@ def add_head_camera_args(parser):
                        help='where head frames come from (default: HTD stereo USB camera)')
     group.add_argument('--head_camera_device', type=str, default=None,
                        help='stereo_usb/opencv: device name substring, /dev path or index; '
-                            f'realsense: serial number; zmq: address (default {DEFAULT_ZMQ_ADDRESS})')
+                            f'realsense: serial number; zmq: address (default {DEFAULT_ZMQ_ADDRESS}); '
+                            'static: image file')
     group.add_argument('--head_camera_layout', choices=LAYOUTS, default=None,
                        help='how a source frame becomes the stereo pair; must match training data '
                             '(default: stereo for stereo_usb, duplicate otherwise)')
@@ -258,6 +284,9 @@ def make_head_camera(args, view_size, fps, embodiment='', device_lookup=None):
         address = device or DEFAULT_ZMQ_ADDRESS
         print(f'Head camera: ZMQ server {address}')
         source = _ZmqSource(address)
+    elif source_name == 'static':
+        print(f'Head camera: static frame {src_w}x{src_h}')
+        source = _StaticSource(_static_frame(device, src_w, src_h))
     else:
         raise ValueError(f'unknown head camera source {source_name!r}')
     print(f'Head camera layout={args.head_camera_layout} rotate={args.head_camera_rotate} '

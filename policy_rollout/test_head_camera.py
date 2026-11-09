@@ -75,6 +75,12 @@ def test_defaults_keep_upstream_behaviour():
     assert (a.head_camera_layout, a.head_camera_rotate) == ('stretch', 180)
 
 
+def test_static_source_has_view_size():
+    a = hc.resolve_head_camera_args(_args('--head_camera_source', 'static'), 'g1_inspire_wb')
+    assert (a.head_camera_layout, a.head_camera_rotate) == ('duplicate', 0)
+    assert hc.make_head_camera(a, VIEW, 30).read().shape == (480, 1280, 3)
+
+
 class _FakeSource:
     def __init__(self, frames):
         self.frames = list(frames)

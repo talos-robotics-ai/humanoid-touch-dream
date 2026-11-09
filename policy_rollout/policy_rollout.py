@@ -29,6 +29,9 @@ sys.path.insert(0, robot_control_dir)
 from teleop_dds_msgs import TeleopDataWB
 data_collect_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data_collect')
 sys.path.insert(0, data_collect_dir)
+# Repo root for deploy/ (appended: nothing there shadows the bare imports above)
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import collections
 import traceback
 
 from camera_utils import list_video_devices, find_device_path_by_name
@@ -38,6 +41,11 @@ from g1_command import (INSPIRE_TO_UNIFIED_EEF, UNIFIED_TO_UNITREE_EEF_ROT_REMAP
 from inference_engine import FastInference, require_cuda
 from head_camera import add_head_camera_args, make_head_camera, resolve_head_camera_args
 from mxt_loading import checkpoint_path, load_mxt_policy, mxt_camera_size, mxt_inference_config
+from deploy import dds as deploy_dds
+from deploy.msgs import (TOPIC_CAMERA, TOPIC_POLICY_STATUS, TOPIC_PREDICTED_CHUNK, TOPIC_SUPERVISOR,
+                         CameraFrame, PolicyStatus, PredictedChunk, SupervisorStatus)
+from deploy.telemetry import (MISSING_AGE_S, LoopTimer, camera_message, chunk_message, is_ready,
+                              policy_status_message)
 
 # Tactile key -> (hand, start, end) for slicing full 1062-dim tactile
 _TACTILE_KEY_SLICE = {
@@ -172,6 +180,11 @@ class HTDPolicyRollout:
         self.rollout_counter = 0
         self.infer_interval = self.args.inference_interval
         self.command_traj_dict = {}
+        self.supervisor = bool(getattr(self.args, 'supervisor', False))
+        self._warmed_up = False
+        self._inference_ms = collections.deque(maxlen=10)
+        self._restart_chunk = threading.Event()   # set by the supervisor listener, consumed by the control loop
+        self._loop_timer = LoopTimer() if self.supervisor else None
         self.init_chunk_schedule()
         self.warmup_inference()
         
@@ -181,6 +194,8 @@ class HTDPolicyRollout:
         
         # Initialize DDS teleoperation publisher
         self.init_dds_publisher()
+        if self.supervisor:
+            self.init_supervisor_telemetry()
         
         self.inspire_hand_type = getattr(self.args, 'inspire_hand_type', 'dftp')
         self.robot_state = None
@@ -332,6 +347,7 @@ class HTDPolicyRollout:
                                         image_right[self.crop_size_h:, :]))
 
                     self.head_color_frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    self.head_frame_t = time.monotonic()
                 elapsed_time = time.time() - start_time
                 sleep_time = frame_duration - elapsed_time
                 if sleep_time > 0:
@@ -460,6 +476,83 @@ class HTDPolicyRollout:
         self.dds_writer_teleop = DataWriter(self.dds_participant, self.dds_topic_teleop)
         
         print(f"✅ DDS publisher initialized on topic: {kTopicTeleopData}")
+
+    def init_supervisor_telemetry(self):
+        """--supervisor: status, predicted chunk and camera writers; supervisor state reader."""
+        p = self.dds_participant
+        self.writer_status = deploy_dds.writer(p, TOPIC_POLICY_STATUS, PolicyStatus)
+        self.writer_chunk = deploy_dds.writer(p, TOPIC_PREDICTED_CHUNK, PredictedChunk)
+        self.writer_camera = deploy_dds.writer(p, TOPIC_CAMERA, CameraFrame)
+        self.reader_supervisor = deploy_dds.reader(p, TOPIC_SUPERVISOR, SupervisorStatus)
+        self._supervisor_state = None
+        self._telemetry_errors = set()   # telemetry threads that already printed an error
+        if not self.args.async_inference:
+            print("Warning: --supervisor without --async_inference publishes no predicted chunks")
+        print(f"✅ Supervisor telemetry on {TOPIC_POLICY_STATUS}, {TOPIC_PREDICTED_CHUNK}, {TOPIC_CAMERA}")
+
+    def _telemetry_error(self, where, e):
+        if where not in self._telemetry_errors:
+            self._telemetry_errors.add(where)
+            print(f"Error in {where} (printed once): {e}")
+
+    def _input_ages(self):
+        """Seconds since the last robot state, hand state and head frame (MISSING_AGE_S if none yet)."""
+        now = time.time()
+        with self.robot_state_lock:
+            robot = self.robot_state
+        with self.robot_eef_state_lock:
+            eef = self.robot_eef_state
+        head_t = getattr(self, 'head_frame_t', None)
+        return (now - robot['timestamp'] if robot is not None else MISSING_AGE_S,
+                now - eef['timestamp'] if eef is not None else MISSING_AGE_S,
+                time.monotonic() - head_t if head_t is not None else MISSING_AGE_S)
+
+    def _telemetry_status_thread(self):
+        """--supervisor: PolicyStatus at 5 Hz."""
+        budget_ms = 0.5 * 1000 * self.infer_interval / self.args.control_freq
+        checkpoint = checkpoint_path(self.args.model_path, self.args.checkpoint)
+        while self.running:
+            try:
+                ages = self._input_ages()
+                recent = list(self._inference_ms)
+                last_ms = recent[-1] if recent else None
+                ready, detail = is_ready(self._warmed_up, ages, last_ms, budget_ms)
+                traj = self.command_traj_dict
+                horizon = len(traj['body_pose']) if 'body_pose' in traj else 0
+                self.writer_status.write(policy_status_message(
+                    ready, self.on_rollout and not self.pause_commands,
+                    float(np.median(recent)) if recent else 0.0,
+                    self.scheduler.switches, self.scheduler.overrun_steps, ages,
+                    self._loop_timer.stats(time.perf_counter()), self.infer_interval, horizon,
+                    checkpoint, detail, time.time()))
+            except Exception as e:
+                self._telemetry_error('policy status', e)
+            time.sleep(0.2)
+
+    def _telemetry_camera_thread(self):
+        """--supervisor: the policy's head frame as JPEG at 5 Hz."""
+        while self.running:
+            if getattr(self, 'head_frame_t', None) is not None:   # nothing before the first real frame
+                try:
+                    self.writer_camera.write(camera_message(self.head_color_frame, time.time()))
+                except Exception as e:
+                    self._telemetry_error('camera frame', e)
+            time.sleep(0.2)
+
+    def _supervisor_listener_thread(self):
+        """--supervisor: restart the chunk whenever the supervisor enters RUNNING."""
+        while self.running:
+            try:
+                for sample in self.reader_supervisor.take(N=4):
+                    if sample is None or not hasattr(sample, 'state'):
+                        continue
+                    if self._supervisor_state != "RUNNING" and sample.state == "RUNNING":
+                        self._restart_chunk.set()
+                        print("Supervisor entered RUNNING: restarting the chunk")
+                    self._supervisor_state = sample.state
+            except Exception as e:
+                self._telemetry_error('supervisor listener', e)
+            time.sleep(0.005)
     
     def init_dds_robot_state_subscriber(self):
         """Initialize DDS subscriber for robot state"""
@@ -812,6 +905,7 @@ class HTDPolicyRollout:
         algorithm selection, CUDA graph capture and a check that the graph matches the
         normal forward. Prints what inference will use and how long it takes."""
         if self.policy_class != 'MXT':
+            self._warmed_up = True   # nothing to warm up
             return
         if getattr(self, 'head_color_frame', None) is None:
             self.head_color_frame = np.zeros((*self.main_cam_size, 3), dtype=np.uint8)
@@ -825,6 +919,7 @@ class HTDPolicyRollout:
             ms = self.inference.time_ms(obs, mask, infer_dream=dream)
             print(f'Inference{" (with dream heads)" if dream else ""}: {status}; '
                   f'{ms:.1f} ms on {self.inference.gpu_name}')
+        self._warmed_up = True
 
     def _to_policy_device(self, x):
         if isinstance(x, torch.Tensor):
@@ -900,6 +995,15 @@ class HTDPolicyRollout:
             except Exception:
                 traceback.print_exc()
                 result = None
+            if result is not None:
+                traj, _, seconds = result
+                self._inference_ms.append(1000 * seconds)
+                if self.supervisor:
+                    try:
+                        self.writer_chunk.write(chunk_message(traj, t_obs, self.infer_interval,
+                                                              1000 * seconds, time.time()))
+                    except Exception as e:
+                        self._telemetry_error('predicted chunk', e)
             self._infer_results.put((gen, t_obs, result))
 
     def _report_overrun(self):
@@ -1363,6 +1467,12 @@ class HTDPolicyRollout:
         keyboard_listener_thread.start()
         if self.args.async_inference:
             threading.Thread(target=self.inference_worker_thread, daemon=True).start()
+        if self.supervisor:
+            self.on_rollout = True   # start without key presses; keys 1/2/3 keep working
+            for target in (self._telemetry_status_thread, self._telemetry_camera_thread,
+                           self._supervisor_listener_thread):
+                threading.Thread(target=target, daemon=True).start()
+            print("Supervisor mode: inference started, publishing status, predicted chunks and camera")
 
         # Main control loop
         loop_period = 1.0 / self.args.control_freq
@@ -1374,6 +1484,10 @@ class HTDPolicyRollout:
         try:
             while self.running:
                 loop_start = time.perf_counter()
+                if self._restart_chunk.is_set():
+                    self._restart_chunk.clear()
+                    self.scheduler.reset()
+                    self.rollout_counter = 0
                 if self.on_reset:
                     self.rollout_counter = 0
                     self.scheduler.reset()
@@ -1381,6 +1495,8 @@ class HTDPolicyRollout:
                     if not self.pause_commands:
                         self.policy_rollout()
                 elapsed = time.perf_counter() - loop_start
+                if self._loop_timer is not None:
+                    self._loop_timer.add(elapsed, loop_start)
                 if elapsed > loop_period * 1.5:
                     print(f"Warning: Control loop exceeded target rate: {elapsed:.4f}s > {loop_period:.4f}s")
                 # Fixed-rate ticks (no drift from "sleep period - work"); after a long stall
@@ -1934,6 +2050,7 @@ if __name__ == "__main__":
     parser.add_argument("--dream_touch_save_dir", type=str, default='', help="directory for dream touch results (default: dream_touch_results/ under model_path)")
     parser.add_argument("--send_velocity_commands", type=str2bool, default=False, help="send inferred velocity commands to the robot for locomotion control")
     parser.add_argument("--inspire_hand_type", type=str, default='dftp', choices=['dftp', 'f1'], help="Inspire hand type: dftp (default) or f1 (capacitive)")
+    parser.add_argument("--supervisor", type=str2bool, default=False, help="run under the g1_walk supervisor: start inference automatically, publish status, predicted chunks and camera frames, restart the chunk when the supervisor enters RUNNING")
 
     add_head_camera_args(parser)
     args = parser.parse_args()
