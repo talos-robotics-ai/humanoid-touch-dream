@@ -6,13 +6,15 @@
 #   + the HTD-side controller (g1_walk/controller.py --iface lo --supervisor off)
 #
 # The caller sets MOD (the g1_walk directory), PY, LOG and NAME (log prefix),
-# optionally SIM_ENV (extra VAR=value words for the sim host, e.g. PSI_SIM_VIDEO),
+# optionally SIM_ENV (extra VAR=value words for the sim host, e.g. PSI_SIM_VIDEO) and
+# SIM_HOST (a wrapper run in place of sim/sim_host.py, e.g. scene_sim/scene_sim_host.py), SIM_PY (its
+# interpreter when not PY, e.g. Isaac Sim's python.sh), SIM_ARGS (extra host arguments), SIM_PREFIX (words put before the host's command, e.g. taskset -c 0,1) and SIM_WAIT_S,
 # then calls `stack_start`. Every process started is stopped on exit, Ctrl-C and
 # failure -- controller, then walker, then sim host -- and STACK_CLEAN is set to 1
 # if any outlives its stop: a stray walker keeps publishing rt/lowcmd.
 
 TELEOP="$MOD/teleop-cbf-perception/teleop"
-STACK_PATTERNS=('[s]im/sim_host.py' '[g]1_jetson_walker.py' '[g]1_walk/controller.py')
+STACK_PATTERNS=('[s]im/sim_host.py' '[s]im_host.py --iface' '[g]1_jetson_walker.py' '[g]1_walk/controller.py')
 SIM_PID="" WALKER_PID="" CTRL_PID=""
 STACK_CLEAN=0
 
@@ -66,9 +68,9 @@ stack_start() {
     # shellcheck disable=SC2086  # SIM_ENV is a list of VAR=value words
     (cd "$TELEOP" && exec env PYTHONUNBUFFERED=1 MUJOCO_GL=egl PSI_SIM_HOLD_RELEASE=session \
         PSI_SIM_BASE_METER_S=1 PSI_SIM_RENDER_FPS=5 ${SIM_ENV:-} \
-        "$PY" sim/sim_host.py --iface lo --domain 0 --lower jetson --inspire) > "$LOG/sim.log" 2>&1 &
+        ${SIM_PREFIX:-} "${SIM_PY:-$PY}" "${SIM_HOST:-sim/sim_host.py}" --iface lo --domain 0 --lower jetson --inspire ${SIM_ARGS:-}) > "$LOG/sim.log" 2>&1 &
     SIM_PID=$!
-    wait_for "$LOG/sim.log" "Publishing rt/lowstate" 60 "$SIM_PID" || return 1
+    wait_for "$LOG/sim.log" "Publishing rt/lowstate" "${SIM_WAIT_S:-60}" "$SIM_PID" || return 1
 
     say "walker"
     PYTHONUNBUFFERED=1 bash "$MOD/run_walker.sh" --iface lo --python "$PY" > "$LOG/walker.log" 2>&1 &
