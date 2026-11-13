@@ -15,7 +15,9 @@
 # renderer is started there over ssh in tmux session htd_render (its scene_frame.json is refreshed first) and stopped
 # at the end; --no_render_start uses one that already runs. Sequence: bring-up, wait for HTDPOLICY READY TO DEPLOY,
 # `start`, run --seconds, `stop`, teardown. Writes deploy/tests/logs/scene_<time>[_tag]/: the processes' logs,
-# objects.jsonl (object poses at 10 Hz), spectator.mp4 (MuJoCo's third-person view), head_camera.mp4 (what the policy
+# objects.jsonl (object poses at 10 Hz), bodies.jsonl (every body's pose at HTD_SIM_STATE_HZ, for real2sim's head_camera.py --playback: first- and
+# third-person clips rendered after the run; SPECTATOR=1 adds MuJoCo's third-person view, spectator.mp4, recorded in the
+# host at the cost of its real time), head_camera.mp4 (what the policy
 # saw, fetched from the render host) and result.json (did the vessel end up inside the bin: see scene_result.py).
 # Exit 0 when the run completed (whatever the task outcome), 1 when the stack failed.
 set -uo pipefail
@@ -141,7 +143,7 @@ else
 fi
 (cd "$TELEOP" && exec env PYTHONUNBUFFERED=1 MUJOCO_GL=egl PSI_SIM_HOLD_RELEASE=session PYTHONPATH="$SIM_PP" \
     PSI_SIM_BASE_METER_S=1 PSI_SIM_RENDER_FPS=5 PSI_SIM_SCENE="$SCENE/scene.xml" \
-    PSI_SIM_VIDEO="$LOG/spectator.mp4" PSI_SIM_VIDEO_FPS=30 \
+    $([[ "${SPECTATOR:-0}" == 1 ]] && echo PSI_SIM_VIDEO="$LOG/spectator.mp4" PSI_SIM_VIDEO_FPS=30) \
     HTD_SIM_TOUCH="${HTD_SIM_TOUCH-$([[ -f $MOD/scene_sim/out/touch_model.npz ]] && echo $MOD/scene_sim/out/touch_model.npz)}" HTD_SIM_STATE_PUB="$STATE" HTD_SIM_STATE_HZ="${HTD_SIM_STATE_HZ:-30}" HTD_SIM_STATE_LOG="$LOG/objects.jsonl" \
     ${SIM_PREFIX:-} "${SIM_CMD[@]}" "${SIM_ARGS[@]}") > "$LOG/sim.log" 2>&1 &
 SIM_PID=$!

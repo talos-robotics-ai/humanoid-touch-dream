@@ -10,7 +10,8 @@ is sent on a ZMQ PUB socket (it *connects*; the renderer binds) as one JSON mess
 
     {"t": sim seconds, "wall": epoch seconds, "bodies": {name: [x, y, z, qw, qx, qy, qz]}}
 
-in the MuJoCo world frame. ``HTD_SIM_STATE_LOG`` also appends the free bodies other than the robot (the scene's
+in the MuJoCo world frame (also appended to ``bodies.jsonl`` beside the state log, the input of the renderer's
+``--playback``; ``HTD_SIM_BODY_LOG=0`` turns that off). ``HTD_SIM_STATE_LOG`` also appends the free bodies other than the robot (the scene's
 objects) to a JSON-lines file at 10 Hz, for judging the episode afterwards; with it, ``contacts.jsonl`` beside it
 gets, at the same rate, the poses of the bodies named in ``HTD_SIM_LOG_BODIES`` (comma separated; default the two
 hand bases) and every contact between two different bodies' trees that carries force:
@@ -69,6 +70,9 @@ class StatePublisher:
             self.sock.connect(address)
         self.log = Lines(log_path) if log_path else None
         self.contact_log = Lines(Path(log_path).with_name("contacts.jsonl")) if log_path else None
+        # every published state (all bodies' world poses), for rendering the run afterwards (HTD_SIM_BODY_LOG=0: off)
+        self.body_log = (Lines(Path(log_path).with_name("bodies.jsonl"))
+                         if log_path and os.environ.get("HTD_SIM_BODY_LOG", "1") != "0" else None)
         self.watch_names = [n for n in os.environ.get(
             "HTD_SIM_LOG_BODIES", "left_base_link,right_base_link").split(",") if n]
         self.log_next = 0.0
@@ -94,14 +98,17 @@ class StatePublisher:
             self._index(model)
         self.next_t = t + self.period
         xpos, xquat = data.xpos, data.xquat
-        if self.sock is not None:
+        if self.sock is not None or self.body_log is not None:
             bodies = {self.names[b]: [round(float(v), 5) for v in (*xpos[b], *xquat[b])]
                       for b in range(1, model.nbody)}
-            try:
-                self.sock.send_string(json.dumps({"t": round(t, 4), "wall": time.time(), "bodies": bodies}),
-                                      flags=1)  # zmq.NOBLOCK
-            except Exception:  # noqa: BLE001 - never stall the physics for the renderer
-                pass
+            msg = json.dumps({"t": round(t, 4), "wall": time.time(), "bodies": bodies})
+            if self.sock is not None:
+                try:
+                    self.sock.send_string(msg, flags=1)  # zmq.NOBLOCK
+                except Exception:  # noqa: BLE001 - never stall the physics for the renderer
+                    pass
+            if self.body_log is not None:
+                self.body_log.write(msg + "\n")
         if self.log is not None and t >= self.log_next:
             self.log_next = t + 0.1
             self.log.write(json.dumps({"t": round(t, 3), **{

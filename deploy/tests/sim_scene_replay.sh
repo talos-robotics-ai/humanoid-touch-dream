@@ -33,7 +33,10 @@ LOG="$HERE/logs/replay_$(date +%Y%m%d_%H%M%S)_${SOURCE}$TAG"
 NAME=scene_replay
 TOUCH="$MOD/scene_sim/out/touch_model.npz"
 SIM_HOST="$MOD/scene_sim/scene_sim_host.py"
-SIM_ENV="PSI_SIM_SCENE=$SCENE/scene.xml PSI_SIM_VIDEO=$LOG/spectator.mp4 PSI_SIM_VIDEO_FPS=30 HTD_SIM_STATE_LOG=$LOG/objects.jsonl"
+# no spectator video in the host by default (SPECTATOR=1): rendering it there costs the real time the walker needs;
+# bodies.jsonl (every body's pose at 30 Hz) is rendered afterwards instead (real2sim/isaac/head_camera.py --playback)
+SIM_ENV="PSI_SIM_SCENE=$SCENE/scene.xml HTD_SIM_STATE_LOG=$LOG/objects.jsonl HTD_SIM_STATE_HZ=${HTD_SIM_STATE_HZ:-30}"
+[[ "${SPECTATOR:-0}" == 1 ]] && SIM_ENV="$SIM_ENV PSI_SIM_VIDEO=$LOG/spectator.mp4 PSI_SIM_VIDEO_FPS=30"
 [[ -f "$TOUCH" ]] && SIM_ENV="$SIM_ENV HTD_SIM_TOUCH=${HTD_SIM_TOUCH-$TOUCH}"
 [[ -n "${HTD_SIM_LOG_BODIES:-}" ]] && SIM_ENV="$SIM_ENV HTD_SIM_LOG_BODIES=$HTD_SIM_LOG_BODIES"
 if [[ $SIM == isaac ]]; then
