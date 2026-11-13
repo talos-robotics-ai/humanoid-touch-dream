@@ -41,7 +41,7 @@ def test_status_message_carries_state_flags_remote_and_timing():
     events = RemoteEvents(start=False, stop=False, reset=False, rearm=False, deflected=True,
                           manual_vx=0.12, manual_wz=-0.2, pressed=("L1", "start"))
     snap = RemoteSnapshot(0.0, 0.5, -0.4, 0.0, frozenset({1, 2}), False)
-    d = sup.step(Inputs(True, None, standing, False, True, events, (), (), False), 10.5)
+    d = sup.step(Inputs(True, None, standing, False, True, events, (), (), False, True, 0.0), 10.5)
     m = status_message(sup, d, standing, events, snap, False, True, True, None, True, False,
                        (2.5, 7.0), "[supervisor] BOOT -> STABILIZING: walker live",
                        ("[supervisor] start ignored in BOOT", "[supervisor] BOOT -> STABILIZING: walker live"),
@@ -69,3 +69,26 @@ def test_ui_commands_stamped_in_the_future_are_rejected():
     f = UiCommandFilter(max_age_s=0.5)
     assert f.accept(UiCommand(timestamp=100.2, nonce=1, command="start", source="ui"), 100.0) is None
     assert f.accept(UiCommand(timestamp=100.0, nonce=2, command="start", source="ui"), 100.0) == "start"   # age 0
+
+
+def _status(ts, robot=0.0, eef=0.0, cam=0.0):
+    from deploy.msgs import PolicyStatus
+    return PolicyStatus(ts, False, True, 20.0, 1, 0, robot, eef, cam, 1.0, 2.0, 45, 60, "x", "inference slow")
+
+
+def test_observations_ok_ignores_readiness_but_not_input_ages():
+    from deploy.controller_bridge import observations_ok
+    assert observations_ok(_status(100.0), 100.1, 0.3, 0.5)             # not ready, inputs fresh
+    assert not observations_ok(_status(100.0, cam=0.31), 100.1, 0.3, 0.5)
+    assert not observations_ok(_status(100.0, robot=float("nan")), 100.1, 0.3, 0.5)
+    assert not observations_ok(_status(100.0, eef=0.4), 100.1, 0.3, 0.5)
+    assert not observations_ok(_status(100.0), 100.6, 0.3, 0.5)          # the status itself is old
+    assert not observations_ok(_status(100.0), 99.0, 0.3, 0.5)           # from the future: clock skew
+    assert not observations_ok(None, 100.0, 0.3, 0.5)
+
+
+def test_torso_tilt():
+    import math
+    from deploy.controller_bridge import torso_tilt
+    assert torso_tilt((0, 0, 0.78, 0.1, -0.2, 3.0)) == 0.2
+    assert math.isnan(torso_tilt(None))

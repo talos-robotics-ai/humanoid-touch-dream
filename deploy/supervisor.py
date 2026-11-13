@@ -42,6 +42,11 @@ class Inputs:
     ui: tuple[str, ...]
     keyboard: tuple[str, ...]
     lowstate_stale: bool
+    # What RUNNING watches besides the frames: the policy's inputs are fresh (its robot state,
+    # hand state and head camera, as its status reports them) and the robot's tilt
+    # (max |roll|, |pitch|; NaN when unknown, which fails closed).
+    observations_ok: bool
+    tilt: float
 
 
 @dataclass(frozen=True)
@@ -63,7 +68,7 @@ class _Ctx:
     rearm: bool
     reset: bool
     released_s: float  # seconds the sticks have been centred (MANUAL only)
-    release_needed: float
+    spec: SupervisorSpec
 
     @property
     def ok(self) -> bool:
@@ -88,12 +93,18 @@ def _running_exit(c: _Ctx) -> str | None:
         return "policy frames stopped"
     if c.fault_class == "link":
         return f"link fault: {c.i.fault}"
+    if c.i.lowstate_stale:
+        return "low-state stale"
+    if not c.i.tilt <= c.spec.running_tilt_max:       # `not x <= limit` so NaN fails closed
+        return "tilt %.2f rad > %.2f" % (c.i.tilt, c.spec.running_tilt_max)
+    if not c.i.observations_ok:
+        return "policy observations stale"
     return None
 
 
 def _manual_exit(c: _Ctx) -> str | None:
-    if c.released_s >= c.release_needed:
-        return "sticks released for %.1f s" % c.release_needed
+    if c.released_s >= c.spec.manual_release_s:
+        return "sticks released for %.1f s" % c.spec.manual_release_s
     if c.i.lowstate_stale:
         return "low-state stale"
     if c.fault_class == "link":
@@ -117,6 +128,9 @@ _TABLE = (
     ({State.STABILIZING}, State.READY,
      lambda c: "standing %.1f s, policy ready, frames fresh" % c.i.standing.held_s if c.ok else None,
      lambda f: ("log_ready",)),
+    # Stop first: a stop beats a start (or a reset) in the same tick, and the start that follows
+    # it is ignored in HOLD, which only a deliberate re-arm leaves.
+    ({State.READY}, State.HOLD, lambda c: "stop" if c.stop else None, lambda f: ("freeze",)),
     # Reset before the lost row: a reset in the tick a condition drops must still reset.
     ({State.READY}, State.STABILIZING, lambda c: "reset" if c.reset else None, lambda f: ("reset",)),
     ({State.READY}, State.STABILIZING, lambda c: None if c.ok else _lost(c), lambda f: ()),
@@ -156,7 +170,7 @@ class Supervisor:
 
         r = i.remote
         c = _Ctx(i, classify_fault(i.fault), flag("start", r.start), flag("stop", r.stop),
-                 flag("rearm", r.rearm), flag("reset", r.reset), released, self.spec.manual_release_s)
+                 flag("rearm", r.rearm), flag("reset", r.reset), released, self.spec)
 
         target, reason, entry = None, "", ()
         if prev is not State.ESTOP and c.fault_class == "estop":

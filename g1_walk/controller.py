@@ -72,8 +72,8 @@ from commands import (TORSO_ATTITUDE_MODES, WalkGate, parse_teleop_data,  # noqa
 from ik_worker import IkProcess, IkWorker, build_arm_ik  # noqa: E402
 from shaping import ArmShaper, Glide, TorsoEngage  # noqa: E402
 from deploy import dds, remote  # noqa: E402
-from deploy.controller_bridge import (TickTimer, UiCommandFilter, standing_sample,  # noqa: E402
-                                      status_message)
+from deploy.controller_bridge import (TickTimer, UiCommandFilter, observations_ok,  # noqa: E402
+                                      standing_sample, status_message, torso_tilt)
 from deploy.g1_spec import G1_SPEC  # noqa: E402
 from deploy.msgs import (RECENT_LOG_LINES, TOPIC_POLICY_STATUS, TOPIC_SUPERVISOR,  # noqa: E402
                          TOPIC_UI_COMMAND, PolicyStatus, SupervisorStatus, UiCommand)
@@ -87,6 +87,13 @@ TOPIC_EEF = "rt/robot/eef_state"
 TOPIC_TOUCH = ("rt/inspire_hand/touch/l", "rt/inspire_hand/touch/r")
 SUPERVISOR_KEYS = {"s": "stop", "g": "rearm", "r": "reset"}
 IK_READY_TIMEOUT_S = 60.0
+# A control tick that raises, or none completing for TICK_WATCHDOG_S: walk zero and the policy
+# stopped at once; the walker stands after TICK_FAIL_STAND_AFTER failures in a row or a stall
+# of TICK_STALL_STAND_S. A tick takes well under 1 ms since the IK left it.
+TICK_WATCHDOG_S = 0.1
+TICK_WATCHDOG_PERIOD_S = 0.02
+TICK_FAIL_STAND_AFTER = 5
+TICK_STALL_STAND_S = 0.5
 
 
 def parse_args(argv=None):
@@ -178,6 +185,11 @@ class Controller:
         self.home = load_home_pose()
 
         self._lock = threading.RLock()
+        self._tick_done = None          # monotonic end of the last tick that completed
+        self._tick_failures = 0         # consecutive failed ticks
+        self._tick_fail_logged = float("-inf")
+        self._tick_fail_stood = False   # the walker was stood for the current run of failures
+        self._engaging = False          # a tick is waiting on the walker's engage answer
         self._estop = EStopLatch()
         self.quit = threading.Event()
         self.session = False
@@ -392,14 +404,66 @@ class Controller:
             try:
                 with self._lock:
                     self._tick(time.monotonic())
+                self._tick_done = time.monotonic()
+                self._tick_failures, self._tick_fail_stood = 0, False
             except Exception:
-                self.log.exception("[g1_walk] control tick failed")
+                self._tick_failures += 1
+                self._fail_safe("control tick failed", exc=True)
             next_t += self.dt
             delay = next_t - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
             else:
                 next_t = time.monotonic()
+
+    def _fail_safe(self, why, exc=False):
+        """A tick that raised, or none completing: the link's heartbeat keeps resending the
+        last walk command whatever this thread does, so the walk goes to zero here, the policy
+        loses the robot (a supervisor stop on the next tick that runs; off: the keyboard's
+        stop), and if it persists the walker stands. Takes no controller lock: the hung tick
+        may hold it, and the link's walk and op calls have their own."""
+        s = self.walker.strategy
+        s.set_walk_command(0.0, 0.0)
+        self.session = False            # the hands loop stops sending the policy's hands
+        if self.sup is not None:
+            self._stop_request = why
+        else:
+            self.operator_hold = True   # no new session until 'g', as after 's'
+        persistent = self._tick_failures >= TICK_FAIL_STAND_AFTER or (
+            self._tick_done is not None and time.monotonic() - self._tick_done >= TICK_STALL_STAND_S)
+        if persistent and not self._tick_fail_stood:
+            self._tick_fail_stood = True
+            s.stand()
+            self.log.critical("[g1_walk] %s persistently: walk zero, the walker stands" % why)
+        now = time.monotonic()
+        if now - self._tick_fail_logged >= 1.0:  # one line a second, not one a tick
+            self._tick_fail_logged = now
+            line = "[g1_walk] %s (%d in a row): walk zero, the policy is stopped" % (
+                why, self._tick_failures)
+            (self.log.exception if exc else self.log.critical)(line)
+
+    def _engage(self):
+        """walker.engage(), which waits on the walker's answer (up to its blend plus 5 s)
+        inside the tick. The walk is zero at both callers (a session start from READY, MANUAL
+        after a freeze), so the tick watchdog lets that wait be."""
+        self._engaging = True
+        try:
+            return self.walker.engage()
+        finally:
+            self._tick_done = time.monotonic()      # before the flag drops: no watchdog race
+            self._engaging = False
+
+    def _tick_watchdog_loop(self):
+        """Fail safe when the control loop stops completing ticks (a hang, not an exception)."""
+        while not self.quit.is_set():
+            time.sleep(TICK_WATCHDOG_PERIOD_S)
+            done = self._tick_done
+            if done is not None and not self._engaging and time.monotonic() - done > TICK_WATCHDOG_S:
+                try:
+                    self._fail_safe("no control tick for %.2f s" % (time.monotonic() - done))
+                except Exception:
+                    self._say_once("tick_watchdog", "[g1_walk] the tick watchdog failed (logged once)",
+                                   exc=True)
 
     def _tick(self, now):
         if self.sup is not None:
@@ -472,7 +536,7 @@ class Controller:
     def _start_session(self, now):
         """``G1Backend.on_session_start`` + ``_engage_lower`` + the
         pipeline's session boundary."""
-        if not self.walker.engage():
+        if not self._engage():
             self.operator_hold = True
             if self.sup is not None:
                 self.log.critical("[g1_walk] engage refused; re-arm to try again")
@@ -548,8 +612,12 @@ class Controller:
         walker_live = self.walker.live
         standing = self.standing_check.update(standing_sample(
             walker_live, torso, gyro, leg_dq, age, spec), now)
-        policy_ready = (status is not None and status.ready and time.time() - status.timestamp
-                        <= G1_SPEC.supervisor.policy_status_max_age)
+        sup_spec = G1_SPEC.supervisor
+        now_wall = time.time()
+        policy_ready = (status is not None and status.ready and now_wall - status.timestamp
+                        <= sup_spec.policy_status_max_age)
+        obs_ok = observations_ok(status, now_wall, sup_spec.running_obs_max_age,
+                                 sup_spec.running_status_max_age)
         if self._reset_pending.is_set():
             self._reset_pending.clear()
             kb.append("reset")
@@ -564,7 +632,8 @@ class Controller:
         d = self.sup.step(Inputs(walker_live=walker_live, fault=fault, standing=standing,
                                  policy_ready=policy_ready, frame_fresh=frame_fresh,
                                  remote=events, ui=ui, keyboard=tuple(kb),
-                                 lowstate_stale=stale), now)
+                                 lowstate_stale=stale, observations_ok=obs_ok,
+                                 tilt=torso_tilt(torso)), now)
         for line in d.log:
             self.log.info(line)
             self._last_log = line
@@ -611,7 +680,7 @@ class Controller:
             self.standing_check.reset()     # READY needs a fresh standing hold after a stop
             s.stand()
         elif action == "engage_manual":
-            self._manual_engaged = self.walker.engage()
+            self._manual_engaged = self._engage()
             if self._manual_engaged:
                 self.body.arm_link_watchdog()
                 s.resume()
@@ -785,7 +854,8 @@ class Controller:
 
     # -- the process ------------------------------------------------------------------------
     def run(self):
-        loops = [self._dds_in_loop, self._control_loop, self._publish_state_loop]
+        loops = [self._dds_in_loop, self._control_loop, self._tick_watchdog_loop,
+                 self._publish_state_loop]
         if self.hands is not None:
             loops += [self._hands_loop, self._publish_hands_loop]
         if sys.stdin is not None and sys.stdin.isatty():

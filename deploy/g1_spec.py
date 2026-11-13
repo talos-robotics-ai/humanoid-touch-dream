@@ -47,6 +47,14 @@ class SupervisorSpec:
     # transition's status write ~1 ms + rollout's listener poll <= 20 ms + DDS ~3 ms + one
     # rollout tick 33 ms = ~57 ms, so 0.15 s leaves ~90 ms of slack.
     start_frame_margin_s: float = 0.15
+    # RUNNING holds above this tilt (rad, max |roll|, |pitch| of the torso), well under the
+    # walker's own 1.0 rad abort. Teleop episodes peak at ~0.22 rad pitch on the real robot.
+    running_tilt_max: float = 0.35
+    # RUNNING holds when any of the policy's inputs (robot state, hand state, head camera) is
+    # older than this in its status, or the status itself is older than running_status_max_age:
+    # a frozen camera must not drive the robot open loop.
+    running_obs_max_age: float = 0.3
+    running_status_max_age: float = 0.5
 
 
 @dataclass(frozen=True)

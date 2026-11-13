@@ -113,6 +113,8 @@ class Rig:
         c._reset_pending, c._open_hands = threading.Event(), threading.Event()
         c._home_glide, c._arms_home, c._last_arm_cmd = None, True, np.full(14, 0.1)
         c._said, c._stop_request = set(), None
+        c._tick_done, c._tick_failures, c._tick_fail_logged = None, 0, float("-inf")
+        c._tick_fail_stood = c._engaging = False
         c.gravity = lambda q: np.zeros(14)
         self.shapes = []                # the solutions the arm shaper was given
         c.arms = types.SimpleNamespace(begin=lambda q: None,
@@ -391,3 +393,95 @@ def test_supervisor_off_sessions_take_the_worker_solution(monkeypatch):
     assert rig.c.session
     calls = rig.tick(frames=False)
     assert not rig.c.session and ("stand",) in calls    # the policy timeout ends it, as before
+
+
+def test_a_failing_tick_zeroes_the_walk_and_stops_the_policy(rig, monkeypatch):
+    rig.to_running()
+    c = rig.c
+
+    def boom(now):
+        raise RuntimeError("tick bug")
+    monkeypatch.setattr(c, "_supervisor_tick", boom)
+    for n in range(1, controller.TICK_FAIL_STAND_AFTER + 1):
+        rig.calls.clear()
+        c._tick_failures += 1           # as _control_loop's except branch
+        c._fail_safe("control tick failed", exc=True)
+        assert ("walk", 0.0, 0.0) in rig.calls and not c.session
+        assert (("stand",) in rig.calls) == (n == controller.TICK_FAIL_STAND_AFTER)
+    monkeypatch.undo()
+    rig.tick()                          # the next tick that runs turns the request into a stop
+    assert rig.state is State.HOLD
+
+
+def test_control_loop_routes_an_exception_to_the_fail_safe(rig, monkeypatch):
+    rig.to_running()
+    c = rig.c
+    seen = []
+
+    def boom(now):
+        c.quit.set()                    # one pass of the loop
+        raise RuntimeError("tick bug")
+    monkeypatch.setattr(c, "_tick", boom)
+    monkeypatch.setattr(c, "_fail_safe", lambda why, exc=False: seen.append((why, c._tick_failures)))
+    monkeypatch.setattr(controller.time, "sleep", lambda s: None, raising=False)
+    c._control_loop()
+    assert seen == [("control tick failed", 1)]
+
+
+def test_the_watchdog_fails_safe_on_a_stalled_tick_but_not_during_engage(rig, monkeypatch):
+    rig.to_running()
+    c = rig.c
+    seen = []
+    monkeypatch.setattr(c, "_fail_safe", lambda why, exc=False: (seen.append(why), c.quit.set()))
+    c._tick_done, c._engaging = rig.t - 0.05, True
+    calls = {"n": 0}                    # a few watchdog periods, then the loop ends
+
+    def sleep(s):
+        calls["n"] += 1
+        if calls["n"] > 3:
+            c.quit.set()
+    monkeypatch.setattr(controller.time, "sleep", sleep, raising=False)
+    rig.t += 1.0
+    c._tick_watchdog_loop()
+    assert seen == []
+    c._engaging, calls["n"] = False, 0
+    c.quit.clear()
+    c._tick_watchdog_loop()
+    assert seen and seen[0].startswith("no control tick")
+
+
+def test_a_stop_in_ready_holds_and_a_start_after_it_is_ignored(rig):
+    rig.to_ready()
+    rig.c._kb_cmds.append("stop")
+    rig.c._ui_cmds.append("start")
+    rig.tick()
+    assert rig.state is State.HOLD and not rig.c.session
+    rig.c._ui_cmds.append("start")
+    rig.tick(10)
+    assert rig.state is State.HOLD and not rig.c.session
+
+
+def test_running_holds_on_a_stale_head_camera(rig):
+    rig.to_running()
+    c = rig.c
+    rig.tick()
+    assert rig.state is State.RUNNING
+    rig.t += 0.02
+    c._frame, c._frame_t = FRAME, rig.t - 0.001
+    c._torso_pose = (np.array([0.0, 0.0, 0.78, 0.0, 0.0, 0.0]), rig.t)
+    c._policy_status = PolicyStatus(time.time(), True, True, 20.0, 1, 0, 0.0, 0.0, 0.5,
+                                    1.0, 2.0, 45, 60, "test", "")
+    rig.calls.clear()
+    c._tick(rig.t)
+    assert rig.state is State.HOLD and not c.session and ("walk", 0.0, 0.0) in rig.calls
+
+
+def test_running_holds_on_tilt(rig):
+    rig.to_running()
+    c = rig.c
+    rig.t += 0.02
+    c._frame, c._frame_t = FRAME, rig.t - 0.001
+    c._torso_pose = (np.array([0.0, 0.0, 0.78, 0.0, 0.5, 0.0]), rig.t)
+    rig.calls.clear()
+    c._tick(rig.t)
+    assert rig.state is State.HOLD and not c.session

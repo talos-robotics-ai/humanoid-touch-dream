@@ -51,6 +51,23 @@ class UiCommandFilter:
         return cmd.command
 
 
+def observations_ok(status, now_wall: float, max_age_s: float, status_max_age_s: float) -> bool:
+    """The policy's inputs are fresh: its status (PolicyStatus) is recent and every input age it
+    reports (robot state, hand state, head camera) is within ``max_age_s``. Unlike
+    ``status.ready`` this ignores a slow inference. Missing or NaN fails closed."""
+    if status is None or not 0.0 <= now_wall - status.timestamp <= status_max_age_s:
+        return False
+    return all(age <= max_age_s for age in
+               (status.robot_state_age_s, status.eef_state_age_s, status.camera_age_s))
+
+
+def torso_tilt(torso_pose) -> float:
+    """max |roll|, |pitch| of the torso pose (x, y, z, roll, pitch, yaw); NaN when unknown."""
+    if torso_pose is None:
+        return math.nan
+    return float(max(abs(float(torso_pose[3])), abs(float(torso_pose[4]))))
+
+
 def standing_sample(walker_live: bool, torso_pose, gyro, leg_dq, lowstate_age_s: float,
                     spec: StandingSpec) -> StandingSample:
     """A missing input makes the sample fail the check rather than raise."""

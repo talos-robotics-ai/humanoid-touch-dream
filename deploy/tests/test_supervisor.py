@@ -9,7 +9,7 @@ QUIET = RemoteEvents(start=False, stop=False, reset=False, rearm=False, deflecte
 
 def inputs(**over):
     base = dict(walker_live=True, fault=None, standing=STANDING, policy_ready=True, frame_fresh=True,
-                remote=QUIET, ui=(), keyboard=(), lowstate_stale=False)
+                remote=QUIET, ui=(), keyboard=(), lowstate_stale=False, observations_ok=True, tilt=0.0)
     return Inputs(**{**base, **over})
 
 def remote(**over):
@@ -234,3 +234,50 @@ def test_start_ignored_is_logged_even_when_another_transition_fires():
     d = sup.step(inputs(), 1.6)
     d = sup.step(inputs(ui=("start",)), 1.7)
     assert d.state is State.RUNNING and not any("ignored" in line for line in d.log)
+
+
+def to_running(sup, t=0.0):
+    to_ready(sup, t)
+    d = sup.step(inputs(ui=("start",)), t + 0.04)
+    assert d.state is State.RUNNING
+    return d
+
+def test_running_holds_on_stale_lowstate():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_running(sup)
+    d = sup.step(inputs(lowstate_stale=True), 1.0)
+    assert d.state is State.HOLD and d.actions == ("freeze",) and "low-state" in d.reason
+
+def test_running_holds_on_tilt_and_fails_closed_on_nan():
+    lim = G1_SPEC.supervisor.running_tilt_max
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_running(sup)
+    assert sup.step(inputs(tilt=lim - 0.01), 1.0).state is State.RUNNING
+    d = sup.step(inputs(tilt=lim + 0.01), 1.02)
+    assert d.state is State.HOLD and d.actions == ("freeze",) and "tilt" in d.reason
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_running(sup)
+    assert sup.step(inputs(tilt=float("nan")), 1.0).state is State.HOLD
+
+def test_running_holds_on_stale_observations():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_running(sup)
+    d = sup.step(inputs(observations_ok=False), 1.0)
+    assert d.state is State.HOLD and d.actions == ("freeze",) and "observations" in d.reason
+    assert sup.step(inputs(), 1.5).state is State.HOLD          # no auto resume
+
+def test_running_does_not_hold_on_a_slow_inference_alone():
+    """policy_ready drops on one slow inference; RUNNING watches the observations instead."""
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_running(sup)
+    assert sup.step(inputs(policy_ready=False), 1.0).state is State.RUNNING
+
+def test_running_sticks_still_take_over_when_observations_are_stale():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_running(sup)
+    d = sup.step(inputs(observations_ok=False, remote=remote(deflected=True)), 1.0)
+    assert d.state is State.MANUAL and "freeze" in d.actions
+
+def test_ready_stop_holds_and_beats_a_start_in_the_same_tick():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_ready(sup)
+    d = sup.step(inputs(remote=remote(stop=True), ui=("start",)), 1.0)
+    assert d.state is State.HOLD and "start_session" not in d.actions and d.reason == "stop"
+    assert sup.step(inputs(ui=("start",)), 1.02).state is State.HOLD   # a later start is ignored too
+
+def test_ready_stop_wins_over_reset():
+    sup = Supervisor(G1_SPEC.supervisor, 0.0); to_ready(sup)
+    assert sup.step(inputs(keyboard=("stop", "reset")), 1.0).state is State.HOLD

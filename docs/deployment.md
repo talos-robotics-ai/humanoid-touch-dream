@@ -89,8 +89,8 @@ repository; `--log_file PATH` chooses another file. From the MuJoCo check:
 | --- | --- | --- |
 | BOOT | the walker hands the legs over; the arms glide to their home pose; nothing else is commanded | automatically, once the walker is live (the controller prints `READY:`) |
 | STABILIZING | arms at home, or held where they were after a re-arm; walk zero; torso nominal. Policy frames are received, not applied | to READY once the robot stands and the policy is ready (below); sticks: MANUAL; Reset |
-| READY | as STABILIZING. The policy runs in shadow: its predictions reach the UI, nothing moves | Start: RUNNING. A lost check: back to STABILIZING (the log says which); sticks: MANUAL; Reset |
-| RUNNING | the policy drives the arms, hands, torso and walk | Stop, 0.5 s without a policy frame, a link fault or the arm jump guard: HOLD. Sticks: MANUAL. Reset: stops, then resets |
+| READY | as STABILIZING. The policy runs in shadow: its predictions reach the UI, nothing moves | Start: RUNNING. Stop: HOLD (a stop beats a start in the same tick, and a later start is ignored until a re-arm). A lost check: back to STABILIZING (the log says which); sticks: MANUAL; Reset |
+| RUNNING | the policy drives the arms, hands, torso and walk | Stop, 0.5 s without a policy frame, a link fault, the arm jump guard, the robot's low-state older than 0.1 s, torso tilt above 0.35 rad, or stale policy observations (below): HOLD. Sticks: MANUAL. Reset: stops, then resets |
 | HOLD | freeze in place: walk zero, torso and arms hold their last sent targets, the hands keep their grip, the walker keeps balancing | Re-arm or Reset: STABILIZING; sticks: MANUAL |
 | MANUAL | arms, torso and hands hold as in HOLD; the walk comes from the sticks | sticks centred for 1.0 s, or the robot's low-state older than 0.1 s, or a link fault: HOLD. Re-arm with the sticks centred: STABILIZING |
 | ESTOP | nothing is commanded; the walker froze the arms and stands (remote A, its own abort) or damped the motors (L2+B) | restart the processes |
@@ -109,8 +109,24 @@ new start.
 | legs at rest | every leg joint velocity < 0.5 rad/s |
 | low-state fresh | newer than 0.1 s |
 
-The check does not apply in RUNNING, where the robot walks and bends by design; the
-walker's own tilt abort remains the fall guard.
+The check does not apply in RUNNING, where the robot walks and bends by design. RUNNING
+has its own, looser checks, each going to HOLD:
+
+| Check in RUNNING | Limit |
+| --- | --- |
+| low-state fresh | newer than 0.1 s (the remote arrives in it, so a stale low-state also means the controller cannot read the sticks or X) |
+| torso roll and pitch | each within ±0.35 rad (teleop episodes peak at about 0.22 rad on the real robot); unknown counts as failed |
+| policy observations | rollout's robot state, hand state and head camera each newer than 0.3 s, as its status reports them, and the status newer than 0.5 s; a frozen camera must not drive the robot open loop. A slow inference alone does not stop the robot |
+
+The walker's own tilt abort (1.0 rad) remains the fall guard behind these.
+
+**Controller failures.** A control tick that raises, or no tick completing for 0.1 s
+(a hang), sets the walk to zero at once and stops the policy: HOLD on the next tick that
+runs (with `--supervisor off`: as the `s` key). After 5 failed ticks in a row, or a
+stall of 0.5 s, the walker is also told to stand. These come from the controller itself:
+the walker link's heartbeat would otherwise keep resending the last walk command. The
+log says `control tick failed (N in a row)` or `no control tick for <s> s`, once a
+second.
 
 **Policy ready.** Rollout reports ready when the checkpoint is loaded and warmed up, a
 robot state, a hand state and a camera frame have each arrived within the last second,
@@ -151,7 +167,7 @@ tick. Buttons fire on the press, after a 50 ms debounce.
 | Input | Action | Accepted in |
 | --- | --- | --- |
 | Start | start the policy | READY; elsewhere logged as `start ignored in <STATE>` |
-| X | stop: freeze in place | RUNNING |
+| X | stop: freeze in place | RUNNING; READY (goes to HOLD, so a start right after it is ignored) |
 | L1 + Start, held 1.0 s | re-arm | HOLD. From MANUAL: centre the sticks, wait for HOLD (1.0 s), then L1 + Start |
 | Y | reset: arms home, hands open, torso nominal | STABILIZING, READY, HOLD; RUNNING (stops first) |
 | left stick forward / back | walk speed vx: up to 0.30 m/s forward, 0.20 m/s back | every state except BOOT and ESTOP, and not while the low-state is stale or a link fault is asserted; enters MANUAL |
@@ -420,11 +436,13 @@ Why the robot went to HOLD (the log line's reason):
 
 | Reason | Cause |
 | --- | --- |
-| `stop` | X, the UI, `cmd.py stop`, `s`; also the arm jump guard refusing every command for 50 frames, or the walker refusing to engage (logged as `[supervisor] stop: ...` first) |
+| `stop` | X, the UI, `cmd.py stop`, `s`, from RUNNING or READY; also the arm jump guard refusing every command for 50 frames, the walker refusing to engage, or a controller failure (`control tick failed`, `no control tick for <s> s`), each logged as `[supervisor] stop: ...` first |
 | `policy frames stopped` | no frame for 0.5 s: rollout ended or crashed, or no fresh frame came after a start |
 | `link fault: <reason>` | the walker fell silent or the state link dropped |
 | `sticks released for 1.0 s` | MANUAL ended |
-| `low-state stale` | MANUAL with the robot's low-state older than 0.1 s |
+| `low-state stale` | RUNNING or MANUAL with the robot's low-state older than 0.1 s |
+| `tilt <x> rad > 0.35` | RUNNING with the torso rolled or pitched beyond 0.35 rad (`nan`: the torso pose is not arriving) |
+| `policy observations stale` | RUNNING with rollout's robot state, hand state or head camera older than 0.3 s, or its status older than 0.5 s |
 
 ESTOP reasons: `estop_<reason>` (remote A, L2+B damping, or a latch the walker reported)
 and `lower_<reason>` (the walker's composer trip or tilt abort). A silent walker,
